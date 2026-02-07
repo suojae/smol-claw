@@ -702,6 +702,11 @@ Git 상태: {git_status}
             response = await self.claude.execute(prompt, self.get_system_prompt())
             print(f"🤖 AI 응답: {response}")
 
+            # Check usage warning and send Discord alert
+            usage_warning = self.claude.usage_tracker.get_warning()
+            if usage_warning:
+                await self.notify_user(usage_warning)
+
             # 3. Parse JSON
             try:
                 # Extract JSON from markdown code blocks
