@@ -140,7 +140,7 @@ class ClaudeExecutor:
             "--session-id",
             str(uuid.uuid4()),
             "--permission-mode",
-            "dontAsk",
+            "bypassPermissions",
             "--output-format",
             "text",
         ]
