@@ -13,6 +13,8 @@ Same autonomy as OpenClaw!
 __version__ = "0.0.3"
 
 import asyncio
+import hashlib
+import hmac
 import subprocess
 import json
 import os
@@ -44,6 +46,7 @@ CONFIG = {
     "autonomous_mode": True,
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
     "github_repo": os.getenv("GITHUB_REPO", ""),  # e.g. "suojae/smol-claw"
+    "github_webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
     "usage_limits": {
         "max_calls_per_minute": 5,
         "max_calls_per_hour": 20,
@@ -1015,7 +1018,20 @@ async def think():
 @app.post("/webhook/github")
 async def github_webhook(request: Request):
     """Receive GitHub webhook events and push to event queue"""
-    body = await request.json()
+    raw_body = await request.body()
+
+    # HMAC-SHA256 signature verification
+    secret = CONFIG["github_webhook_secret"]
+    if secret:
+        signature_header = request.headers.get("X-Hub-Signature-256", "")
+        expected_sig = "sha256=" + hmac.new(
+            secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected_sig, signature_header):
+            print(f"⚠️ GitHub webhook signature mismatch")
+            raise HTTPException(status_code=403, detail="Invalid signature")
+
+    body = json.loads(raw_body)
     gh_event = request.headers.get("X-GitHub-Event", "unknown")
 
     event_map = {
