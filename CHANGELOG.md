@@ -5,6 +5,17 @@ All notable changes to Smol Claw will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.2] - 2026-02-07
+
+### Fixed
+- 🚨 **Critical**: Fixed Discord bot parameter bug causing server crashes ([#13](https://github.com/suojae/smol-claw/pull/13))
+  - `discord_bot` was incorrectly passed as positional argument, landing in `memory` parameter slot
+  - This caused `AttributeError: 'DiscordBot' object has no attribute 'get_context'`
+  - Now correctly passed as keyword argument: `discord_bot=discord_bot`
+  - Fixes [#12](https://github.com/suojae/smol-claw/issues/12)
+
+**Impact**: Server would crash immediately on startup when Discord bot was configured. This hotfix restores functionality.
+
 ## [0.0.1] - 2026-02-07
 
 ### Added
