@@ -73,6 +73,16 @@ FORBIDDEN_FILES = [
     "id_dsa",
 ]
 
+# Files to skip during checks (documentation, examples)
+SKIP_FILES = [
+    "GUARDRAILS.md",      # Contains security examples
+    "README.md",          # Contains good/bad examples
+    "README.ko.md",       # Contains good/bad examples
+    "scripts/check-secrets.py",  # Pattern definitions
+    "CONTRIBUTING.md",    # May contain examples
+    "STRATEGY.md",        # May contain examples
+]
+
 # File extensions to check
 CHECK_EXTENSIONS = {
     ".py", ".js", ".ts", ".jsx", ".tsx",
@@ -122,12 +132,16 @@ def check_forbidden_filename(file_path: Path) -> bool:
 
 def should_check_file(file_path: Path) -> bool:
     """Determine if file should be checked"""
+    # Skip documentation and example files
+    if file_path.name in SKIP_FILES or str(file_path) in SKIP_FILES:
+        return False
+
     # Check extension
     if file_path.suffix not in CHECK_EXTENSIONS:
         return False
 
     # Skip certain directories
-    skip_dirs = {".git", "node_modules", "venv", ".venv", "__pycache__", ".pytest_cache"}
+    skip_dirs = {".git", "node_modules", "venv", ".venv", "__pycache__", ".pytest_cache", "memory"}
     if any(part in skip_dirs for part in file_path.parts):
         return False
 
