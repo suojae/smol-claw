@@ -23,12 +23,14 @@ from typing import Optional, Dict, Any, List
 from collections import Counter
 
 import aiohttp
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import uvicorn
 import discord
 from dotenv import load_dotenv
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 load_dotenv()
 
@@ -41,7 +43,19 @@ CONFIG = {
     "check_interval": 30 * 60,  # 30 minutes in seconds
     "autonomous_mode": True,
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
+    "github_repo": os.getenv("GITHUB_REPO", ""),  # e.g. "suojae/smol-claw"
+    "usage_limits": {
+        "max_calls_per_minute": 5,
+        "max_calls_per_hour": 20,
+        "max_calls_per_day": 500,
+        "min_call_interval_seconds": 5,
+        "warning_threshold_pct": 80,
+        "paused": False,
+    },
 }
+
+# Global event queue — all event sources push here, autonomous loop consumes
+event_queue: asyncio.Queue = asyncio.Queue()
 
 
 # ============================================
@@ -124,23 +138,202 @@ class ContextCollector:
 
 
 # ============================================
+# Usage Tracker (토큰 사용량 안전장치) 🦞
+# ============================================
+class UsageLimitExceeded(Exception):
+    """Raised when a usage limit is exceeded"""
+    pass
+
+
+class UsageTracker:
+    """Tracks Claude CLI call usage and enforces rate limits"""
+
+    def __init__(self, usage_file: str = "memory/usage.json"):
+        self.usage_file = Path(usage_file)
+        self.usage_file.parent.mkdir(exist_ok=True)
+        self._data = self._load()
+
+    def _load(self) -> Dict[str, Any]:
+        """Load usage data from file"""
+        if self.usage_file.exists():
+            try:
+                with open(self.usage_file, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {"calls": [], "total_calls": 0}
+
+    def _save(self):
+        """Persist usage data to file"""
+        try:
+            with open(self.usage_file, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"⚠️ Failed to save usage data: {e}")
+
+    def _calls_since(self, seconds: float) -> int:
+        """Count calls within the last N seconds"""
+        cutoff = (datetime.now() - timedelta(seconds=seconds)).isoformat()
+        return sum(1 for ts in self._data["calls"] if ts > cutoff)
+
+    def _cleanup_old_calls(self):
+        """Remove call timestamps older than 24 hours"""
+        cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+        self._data["calls"] = [ts for ts in self._data["calls"] if ts > cutoff]
+
+    def check_limits(self):
+        """Check all usage limits before a call. Raises UsageLimitExceeded if any limit is hit."""
+        limits = CONFIG["usage_limits"]
+
+        # Check if paused
+        if limits.get("paused", False):
+            raise UsageLimitExceeded("Usage is paused by configuration")
+
+        # Check minimum interval (cooldown)
+        min_interval = limits["min_call_interval_seconds"]
+        if self._data["calls"]:
+            last_call = self._data["calls"][-1]
+            elapsed = (datetime.now() - datetime.fromisoformat(last_call)).total_seconds()
+            if elapsed < min_interval:
+                raise UsageLimitExceeded(
+                    f"Cooldown: {min_interval - elapsed:.1f}s remaining "
+                    f"(min interval: {min_interval}s)"
+                )
+
+        # Check per-minute limit
+        per_minute = self._calls_since(60)
+        if per_minute >= limits["max_calls_per_minute"]:
+            raise UsageLimitExceeded(
+                f"Per-minute limit reached: {per_minute}/{limits['max_calls_per_minute']}"
+            )
+
+        # Check per-hour limit
+        per_hour = self._calls_since(3600)
+        if per_hour >= limits["max_calls_per_hour"]:
+            raise UsageLimitExceeded(
+                f"Per-hour limit reached: {per_hour}/{limits['max_calls_per_hour']}"
+            )
+
+        # Check daily limit
+        per_day = self._calls_since(86400)
+        if per_day >= limits["max_calls_per_day"]:
+            raise UsageLimitExceeded(
+                f"Daily limit reached: {per_day}/{limits['max_calls_per_day']}"
+            )
+
+    def record_call(self):
+        """Record a successful call"""
+        self._cleanup_old_calls()
+        self._data["calls"].append(datetime.now().isoformat())
+        self._data["total_calls"] = self._data.get("total_calls", 0) + 1
+        self._save()
+
+    def get_warning(self) -> Optional[str]:
+        """Return a warning message if daily usage exceeds the threshold percentage"""
+        limits = CONFIG["usage_limits"]
+        per_day = self._calls_since(86400)
+        threshold = limits["max_calls_per_day"] * limits["warning_threshold_pct"] / 100
+
+        if per_day >= threshold:
+            return (
+                f"⚠️ Usage warning: {per_day}/{limits['max_calls_per_day']} "
+                f"daily calls used ({per_day * 100 // limits['max_calls_per_day']}%)"
+            )
+        return None
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return current usage stats for the /status endpoint"""
+        limits = CONFIG["usage_limits"]
+        per_minute = self._calls_since(60)
+        per_hour = self._calls_since(3600)
+        per_day = self._calls_since(86400)
+
+        return {
+            "calls_today": per_day,
+            "calls_this_hour": per_hour,
+            "calls_this_minute": per_minute,
+            "limits": {
+                "per_minute": limits["max_calls_per_minute"],
+                "per_hour": limits["max_calls_per_hour"],
+                "per_day": limits["max_calls_per_day"],
+            },
+            "paused": limits.get("paused", False),
+            "total_calls_all_time": self._data.get("total_calls", 0),
+        }
+
+
+# ============================================
+# File Watcher (OS-level push events) 🦞
+# ============================================
+class GitFileHandler(FileSystemEventHandler):
+    """Watches filesystem and pushes events to the queue (no polling)"""
+
+    def __init__(self, loop, debounce_seconds=3.0):
+        self._loop = loop
+        self._debounce_seconds = debounce_seconds
+        self._last_event_time = None
+
+    def _should_ignore(self, path: str) -> bool:
+        ignore_patterns = [".git/", "__pycache__/", ".pyc", ".swp", ".tmp", "node_modules/"]
+        return any(p in path for p in ignore_patterns)
+
+    def _emit(self, path: str, change_type: str):
+        now = datetime.now()
+        if self._last_event_time and (now - self._last_event_time).total_seconds() < self._debounce_seconds:
+            return
+        self._last_event_time = now
+        filename = Path(path).name
+        event = {"type": "file_changed", "detail": f"{filename} {change_type}"}
+        self._loop.call_soon_threadsafe(event_queue.put_nowait, event)
+
+    def on_modified(self, event):
+        if event.is_directory or self._should_ignore(event.src_path):
+            return
+        self._emit(event.src_path, "modified")
+
+    def on_created(self, event):
+        if event.is_directory or self._should_ignore(event.src_path):
+            return
+        self._emit(event.src_path, "created")
+
+
+def start_file_watcher(loop):
+    """Start OS-level file watcher on the project directory"""
+    watch_path = str(Path.home() / "Documents")
+    handler = GitFileHandler(loop)
+    observer = Observer()
+    observer.schedule(handler, watch_path, recursive=True)
+    observer.daemon = True
+    observer.start()
+    print(f"👁️ File watcher started: {watch_path}")
+
+
+# ============================================
 # Claude Executor
 # ============================================
 class ClaudeExecutor:
     """Executes Claude CLI commands"""
 
     def __init__(self):
-        pass
+        self.usage_tracker = UsageTracker()
 
-    async def execute(self, message: str, system_prompt: Optional[str] = None) -> str:
+    async def execute(
+        self,
+        message: str,
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
         """Execute Claude CLI command"""
+        # Check usage limits before executing
+        self.usage_tracker.check_limits()
+
         print(f"[{datetime.now().isoformat()}] 📤 Executing")
 
         args = [
             "claude",
             "--print",
             "--session-id",
-            str(uuid.uuid4()),
+            session_id or str(uuid.uuid4()),
             "--permission-mode",
             "bypassPermissions",
             "--output-format",
@@ -167,6 +360,10 @@ class ClaudeExecutor:
 
             if result.returncode == 0:
                 print(f"[{datetime.now().isoformat()}] 📥 Completed")
+                self.usage_tracker.record_call()
+                warning = self.usage_tracker.get_warning()
+                if warning:
+                    print(warning)
                 return stdout.decode("utf-8").strip()
             else:
                 raise Exception(f"Exit code {result.returncode}: {stderr.decode()}")
@@ -405,6 +602,7 @@ class DiscordBot(discord.Client):
         self.claude = claude
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+        self._channel_sessions: Dict[int, str] = {}  # channel_id -> session_id
 
     async def on_ready(self):
         print(f"🤖 Discord 봇 로그인: {self.user}")
@@ -443,8 +641,14 @@ class DiscordBot(discord.Client):
                 return
 
         try:
+            # Get or create a persistent session for this channel
+            channel_id = message.channel.id
+            if channel_id not in self._channel_sessions:
+                self._channel_sessions[channel_id] = str(uuid.uuid4())
+            session_id = self._channel_sessions[channel_id]
+
             async with message.channel.typing():
-                response = await self.claude.execute(user_message)
+                response = await self.claude.execute(user_message, session_id=session_id)
 
             # Split long messages (Discord 2000 char limit)
             for chunk in self._split_message(response):
@@ -483,6 +687,8 @@ class DiscordBot(discord.Client):
 class AutonomousEngine:
     """Autonomous AI Engine - makes decisions and acts proactively"""
 
+    MAX_CALLS_PER_SESSION = 50
+
     def __init__(
         self,
         claude: ClaudeExecutor,
@@ -495,6 +701,23 @@ class AutonomousEngine:
         self.memory = memory or GuardrailMemory()
         self.discord_bot = discord_bot
         self.last_check = None
+        self._session_id: Optional[str] = None
+        self._session_call_count: int = 0
+
+    def _get_or_reset_session(self) -> str:
+        """Get current session ID, or create a new one if limit reached"""
+        if (
+            self._session_id is None
+            or self._session_call_count >= self.MAX_CALLS_PER_SESSION
+        ):
+            self._session_id = str(uuid.uuid4())
+            self._session_call_count = 0
+            print(f"🔄 New session started: {self._session_id[:8]}... (limit: {self.MAX_CALLS_PER_SESSION} calls)")
+        return self._session_id
+
+    @property
+    def is_first_call_in_session(self) -> bool:
+        return self._session_call_count == 0
 
     def get_system_prompt(self) -> str:
         """Meta-prompt that gives AI autonomy"""
@@ -518,20 +741,19 @@ class AutonomousEngine:
 
 반드시 JSON 형식으로 응답하세요."""
 
-    async def think(self) -> Optional[Dict[str, Any]]:
+    async def think(self, events: Optional[List[Dict[str, str]]] = None) -> Optional[Dict[str, Any]]:
         """AI thinks autonomously and makes decisions"""
         print("\n🧠 자율 AI 사고 중...\n")
 
-        # 1. Collect context
+        # 1. Get or reset session
+        session_id = self._get_or_reset_session()
+        is_first = self.is_first_call_in_session
+
+        # 2. Collect context
         context = await self.context_collector.collect()
         print(f"📊 컨텍스트: {json.dumps(context, indent=2, ensure_ascii=False)}")
 
-        # 2. Get memory context
-        memory_context = self.memory.get_context()
-        safety_context = self.memory.get_safety_context()
-        print(f"🧠 메모리 컨텍스트 로드됨")
-
-        # 3. Ask AI to judge
+        # 3. Build git status string
         git_status = "없음"
         if context["git"]:
             git_status = f"브랜치 {context['git']['branch']}, "
@@ -539,12 +761,25 @@ class AutonomousEngine:
                 "변경사항 있음" if context["git"]["hasChanges"] else "변경사항 없음"
             )
 
-        prompt = f"""현재 상황:
+        # 3.5. Build event summary
+        event_text = ""
+        if events:
+            event_lines = "\n".join([f"- [{e['type']}] {e['detail']}" for e in events])
+            event_text = f"\n🔔 감지된 이벤트:\n{event_lines}\n"
+            print(f"🔔 이벤트 {len(events)}개 감지됨")
+
+        # 4. Build prompt (first call includes patterns, subsequent calls are lightweight)
+        if is_first:
+            memory_context = self.memory.get_context()
+            safety_context = self.memory.get_safety_context()
+            print(f"🧠 세션 첫 호출: 패턴 + 기억 포함")
+
+            prompt = f"""현재 상황:
 
 시간: {context['time']}
 Git 상태: {git_status}
 할 일: {len(context['tasks'])}개
-
+{event_text}
 {memory_context}
 
 {safety_context}
@@ -557,10 +792,31 @@ Git 상태: {git_status}
 ⚠️ 주의: 최근 활동을 확인하고 중복된 알림은 하지 마세요.
 
 스스로 판단해서 JSON으로 응답하세요."""
+        else:
+            print(f"⚡ 세션 {self._session_call_count + 1}/{self.MAX_CALLS_PER_SESSION}: 컨텍스트만 전달")
+
+            prompt = f"""현재 상황 업데이트:
+
+시간: {context['time']}
+Git 상태: {git_status}
+할 일: {len(context['tasks'])}개
+{event_text}
+이전 대화의 기억과 패턴을 참고하여 판단하세요.
+스스로 판단해서 JSON으로 응답하세요."""
 
         try:
-            response = await self.claude.execute(prompt, self.get_system_prompt())
+            response = await self.claude.execute(
+                prompt,
+                self.get_system_prompt() if is_first else None,
+                session_id=session_id,
+            )
+            self._session_call_count += 1
             print(f"🤖 AI 응답: {response}")
+
+            # Check usage warning and send Discord alert
+            usage_warning = self.claude.usage_tracker.get_warning()
+            if usage_warning:
+                await self.notify_user(usage_warning)
 
             # 3. Parse JSON
             try:
@@ -713,6 +969,7 @@ class StatusResponse(BaseModel):
     sessionId: str
     autonomousMode: bool
     lastCheck: Optional[str]
+    usage: Optional[Dict[str, Any]] = None
 
 
 class ThinkResponse(BaseModel):
@@ -741,6 +998,7 @@ async def status():
             if autonomous_engine.last_check
             else None
         ),
+        usage=claude.usage_tracker.get_status(),
     )
 
 
@@ -754,6 +1012,40 @@ async def think():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/webhook/github")
+async def github_webhook(request: Request):
+    """Receive GitHub webhook events and push to event queue"""
+    body = await request.json()
+    gh_event = request.headers.get("X-GitHub-Event", "unknown")
+
+    event_map = {
+        "pull_request_review": "pr_review",
+        "issues": "new_issue",
+        "push": "push",
+        "check_run": "ci_status",
+    }
+
+    event_type = event_map.get(gh_event, gh_event)
+    detail = f"GitHub {gh_event}"
+
+    if gh_event == "push":
+        pusher = body.get("pusher", {}).get("name", "unknown")
+        detail = f"Push by {pusher}"
+    elif gh_event == "issues":
+        action = body.get("action", "")
+        title = body.get("issue", {}).get("title", "")
+        detail = f"Issue {action}: {title}"
+    elif gh_event == "pull_request_review":
+        action = body.get("action", "")
+        reviewer = body.get("review", {}).get("user", {}).get("login", "")
+        detail = f"PR review {action} by {reviewer}"
+
+    event_queue.put_nowait({"type": event_type, "detail": detail})
+    print(f"🔔 GitHub webhook: {event_type} — {detail}")
+
+    return {"status": "ok", "event_type": event_type}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Web dashboard"""
@@ -763,6 +1055,8 @@ async def root():
         else "없음"
     )
 
+    usage = claude.usage_tracker.get_status()
+
     return f"""
     <html>
       <head>
@@ -770,6 +1064,9 @@ async def root():
         <style>
           body {{ font-family: monospace; max-width: 800px; margin: 50px auto; }}
           .status {{ background: #e8f5e9; padding: 20px; border-radius: 5px; }}
+          .usage {{ background: #fff3e0; padding: 20px; border-radius: 5px; margin-top: 10px; }}
+          .usage-bar {{ background: #e0e0e0; border-radius: 4px; height: 20px; margin: 5px 0; }}
+          .usage-bar-fill {{ background: #ff6b6b; height: 100%; border-radius: 4px; }}
           button {{ padding: 10px 20px; font-size: 16px; margin: 5px; }}
         </style>
       </head>
@@ -780,6 +1077,17 @@ async def root():
           <p><strong>Session:</strong> {CONFIG["session_id"]}</p>
           <p><strong>자율 모드:</strong> {'활성화' if CONFIG["autonomous_mode"] else '비활성화'}</p>
           <p><strong>마지막 체크:</strong> {last_check}</p>
+        </div>
+
+        <div class="usage">
+          <h3>📊 사용량</h3>
+          <p><strong>오늘:</strong> {usage["calls_today"]}/{usage["limits"]["per_day"]}</p>
+          <div class="usage-bar">
+            <div class="usage-bar-fill" style="width: {min(usage["calls_today"] * 100 // max(usage["limits"]["per_day"], 1), 100)}%"></div>
+          </div>
+          <p><strong>이번 시간:</strong> {usage["calls_this_hour"]}/{usage["limits"]["per_hour"]}</p>
+          <p><strong>전체 누적:</strong> {usage["total_calls_all_time"]}회</p>
+          <p><strong>상태:</strong> {'⏸️ 일시정지' if usage["paused"] else '✅ 활성'}</p>
         </div>
 
         <h2>수동 트리거</h2>
@@ -803,19 +1111,31 @@ async def root():
 # Background autonomous loop
 # ============================================
 async def autonomous_loop():
-    """Background task that runs autonomous thinking periodically"""
-    print("⏰ 자율 루프 시작")
+    """Queue-based event consumer — blocks until events arrive, zero polling"""
+    print("⏰ 이벤트 기반 자율 루프 시작 (queue consumer)")
 
     # Initial delay
     await asyncio.sleep(5)
 
-    # First run
-    await autonomous_engine.think()
+    # Initial run
+    try:
+        await autonomous_engine.think(events=[{"type": "startup", "detail": "Server started"}])
+    except Exception as e:
+        print(f"❌ Error in initial run: {e}")
 
-    # Periodic runs
+    # Event-driven loop — blocks on queue.get(), wakes only on real events
     while True:
-        await asyncio.sleep(CONFIG["check_interval"])
-        await autonomous_engine.think()
+        try:
+            first_event = await event_queue.get()
+            events = [first_event]
+            # Drain any additional queued events
+            while not event_queue.empty():
+                events.append(event_queue.get_nowait())
+            event_types = [e["type"] for e in events]
+            print(f"🔔 Events received: {event_types}")
+            await autonomous_engine.think(events=events)
+        except Exception as e:
+            print(f"❌ Error in event loop: {e}")
 
 
 @app.on_event("startup")
@@ -826,7 +1146,13 @@ async def startup_event():
     print(f"🧠 자율 모드: {'활성화' if CONFIG['autonomous_mode'] else '비활성화'}")
 
     if CONFIG["autonomous_mode"]:
-        print(f"⏰ {CONFIG['check_interval'] // 60}분마다 자율 체크")
+        print(f"👁️ File watcher + GitHub webhook (이벤트 push, 타이머 없음)")
+
+        # Start OS-level file watcher (push-based)
+        loop = asyncio.get_event_loop()
+        start_file_watcher(loop)
+
+        # Start queue consumer
         asyncio.create_task(autonomous_loop())
 
     # Start Discord bot if configured
