@@ -263,10 +263,13 @@ class ClaudeExecutor:
     """Executes Claude CLI commands"""
 
     def __init__(self):
-        pass
+        self.usage_tracker = UsageTracker()
 
     async def execute(self, message: str, system_prompt: Optional[str] = None) -> str:
         """Execute Claude CLI command"""
+        # Check usage limits before executing
+        self.usage_tracker.check_limits()
+
         print(f"[{datetime.now().isoformat()}] 📤 Executing")
 
         args = [
@@ -300,6 +303,10 @@ class ClaudeExecutor:
 
             if result.returncode == 0:
                 print(f"[{datetime.now().isoformat()}] 📥 Completed")
+                self.usage_tracker.record_call()
+                warning = self.usage_tracker.get_warning()
+                if warning:
+                    print(warning)
                 return stdout.decode("utf-8").strip()
             else:
                 raise Exception(f"Exit code {result.returncode}: {stderr.decode()}")
