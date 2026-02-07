@@ -44,7 +44,7 @@ CONFIG = {
     "usage_limits": {
         "max_calls_per_minute": 5,
         "max_calls_per_hour": 20,
-        "max_calls_per_day": 100,
+        "max_calls_per_day": 500,
         "min_call_interval_seconds": 5,
         "warning_threshold_pct": 80,
         "paused": False,
