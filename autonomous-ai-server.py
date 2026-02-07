@@ -126,8 +126,8 @@ class ContextCollector:
 class ClaudeExecutor:
     """Executes Claude CLI commands"""
 
-    def __init__(self, session_id: str):
-        self.session_id = session_id
+    def __init__(self):
+        pass
 
     async def execute(
         self,
@@ -140,7 +140,7 @@ class ClaudeExecutor:
         args = [
             "claude",
             "--print",
-            "--session-id", self.session_id,
+            "--session-id", str(uuid.uuid4()),
             "--permission-mode", "dontAsk",
             "--output-format", "text",
         ]
@@ -380,7 +380,7 @@ Git 상태: {git_status}
 app = FastAPI(title="Autonomous AI Server")
 
 # Global instances
-claude = ClaudeExecutor(CONFIG["session_id"])
+claude = ClaudeExecutor()
 context_collector = ContextCollector()
 discord_bot: Optional[DiscordBot] = None
 
