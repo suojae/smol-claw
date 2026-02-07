@@ -132,7 +132,12 @@ class ClaudeExecutor:
     def __init__(self):
         pass
 
-    async def execute(self, message: str, system_prompt: Optional[str] = None) -> str:
+    async def execute(
+        self,
+        message: str,
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> str:
         """Execute Claude CLI command"""
         print(f"[{datetime.now().isoformat()}] 📤 Executing")
 
@@ -140,7 +145,7 @@ class ClaudeExecutor:
             "claude",
             "--print",
             "--session-id",
-            str(uuid.uuid4()),
+            session_id or str(uuid.uuid4()),
             "--permission-mode",
             "bypassPermissions",
             "--output-format",
@@ -483,6 +488,8 @@ class DiscordBot(discord.Client):
 class AutonomousEngine:
     """Autonomous AI Engine - makes decisions and acts proactively"""
 
+    MAX_CALLS_PER_SESSION = 50
+
     def __init__(
         self,
         claude: ClaudeExecutor,
@@ -495,6 +502,23 @@ class AutonomousEngine:
         self.memory = memory or GuardrailMemory()
         self.discord_bot = discord_bot
         self.last_check = None
+        self._session_id: Optional[str] = None
+        self._session_call_count: int = 0
+
+    def _get_or_reset_session(self) -> str:
+        """Get current session ID, or create a new one if limit reached"""
+        if (
+            self._session_id is None
+            or self._session_call_count >= self.MAX_CALLS_PER_SESSION
+        ):
+            self._session_id = str(uuid.uuid4())
+            self._session_call_count = 0
+            print(f"🔄 New session started: {self._session_id[:8]}... (limit: {self.MAX_CALLS_PER_SESSION} calls)")
+        return self._session_id
+
+    @property
+    def is_first_call_in_session(self) -> bool:
+        return self._session_call_count == 0
 
     def get_system_prompt(self) -> str:
         """Meta-prompt that gives AI autonomy"""
@@ -522,16 +546,15 @@ class AutonomousEngine:
         """AI thinks autonomously and makes decisions"""
         print("\n🧠 자율 AI 사고 중...\n")
 
-        # 1. Collect context
+        # 1. Get or reset session
+        session_id = self._get_or_reset_session()
+        is_first = self.is_first_call_in_session
+
+        # 2. Collect context
         context = await self.context_collector.collect()
         print(f"📊 컨텍스트: {json.dumps(context, indent=2, ensure_ascii=False)}")
 
-        # 2. Get memory context
-        memory_context = self.memory.get_context()
-        safety_context = self.memory.get_safety_context()
-        print(f"🧠 메모리 컨텍스트 로드됨")
-
-        # 3. Ask AI to judge
+        # 3. Build git status string
         git_status = "없음"
         if context["git"]:
             git_status = f"브랜치 {context['git']['branch']}, "
@@ -539,7 +562,13 @@ class AutonomousEngine:
                 "변경사항 있음" if context["git"]["hasChanges"] else "변경사항 없음"
             )
 
-        prompt = f"""현재 상황:
+        # 4. Build prompt (first call includes patterns, subsequent calls are lightweight)
+        if is_first:
+            memory_context = self.memory.get_context()
+            safety_context = self.memory.get_safety_context()
+            print(f"🧠 세션 첫 호출: 패턴 + 기억 포함")
+
+            prompt = f"""현재 상황:
 
 시간: {context['time']}
 Git 상태: {git_status}
@@ -557,9 +586,25 @@ Git 상태: {git_status}
 ⚠️ 주의: 최근 활동을 확인하고 중복된 알림은 하지 마세요.
 
 스스로 판단해서 JSON으로 응답하세요."""
+        else:
+            print(f"⚡ 세션 {self._session_call_count + 1}/{self.MAX_CALLS_PER_SESSION}: 컨텍스트만 전달")
+
+            prompt = f"""현재 상황 업데이트:
+
+시간: {context['time']}
+Git 상태: {git_status}
+할 일: {len(context['tasks'])}개
+
+이전 대화의 기억과 패턴을 참고하여 판단하세요.
+스스로 판단해서 JSON으로 응답하세요."""
 
         try:
-            response = await self.claude.execute(prompt, self.get_system_prompt())
+            response = await self.claude.execute(
+                prompt,
+                self.get_system_prompt() if is_first else None,
+                session_id=session_id,
+            )
+            self._session_call_count += 1
             print(f"🤖 AI 응답: {response}")
 
             # 3. Parse JSON
