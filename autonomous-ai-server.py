@@ -13,6 +13,8 @@ Same autonomy as OpenClaw!
 __version__ = "0.0.3"
 
 import asyncio
+import hashlib
+import hmac
 import subprocess
 import json
 import os
@@ -44,6 +46,7 @@ CONFIG = {
     "autonomous_mode": True,
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
     "github_repo": os.getenv("GITHUB_REPO", ""),  # e.g. "suojae/smol-claw"
+    "github_webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
     "usage_limits": {
         "max_calls_per_minute": 5,
         "max_calls_per_hour": 20,
@@ -54,7 +57,7 @@ CONFIG = {
     },
 }
 
-# Global event queue — all event sources push here, autonomous loop consumes
+# Global event queue — re-created in startup_event() to match uvicorn's loop
 event_queue: asyncio.Queue = asyncio.Queue()
 
 
@@ -345,20 +348,34 @@ class ClaudeExecutor:
 
         args.append(message)
 
-        try:
-            # Run with timeout
-            result = await asyncio.wait_for(
-                asyncio.create_subprocess_exec(
-                    *args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                ),
-                timeout=60.0,
+        async def _run(cmd_args):
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            stdout, stderr = await proc.communicate()
+            return proc, stdout, stderr
 
-            stdout, stderr = await result.communicate()
+        try:
+            proc, stdout, stderr = await asyncio.wait_for(_run(args), timeout=120.0)
 
-            if result.returncode == 0:
+            # Retry once with new session if "already in use"
+            if proc.returncode != 0:
+                err_msg = stderr.decode()
+                if "already in use" in err_msg:
+                    print(f"⚠️ Session busy, retrying with new session...")
+                    await asyncio.sleep(2)
+                    new_sid = str(uuid.uuid4())
+                    retry_args = [
+                        a if a != args[args.index("--session-id") + 1] else new_sid
+                        for a in args
+                    ]
+                    proc, stdout, stderr = await asyncio.wait_for(
+                        _run(retry_args), timeout=120.0
+                    )
+
+            if proc.returncode == 0:
                 print(f"[{datetime.now().isoformat()}] 📥 Completed")
                 self.usage_tracker.record_call()
                 warning = self.usage_tracker.get_warning()
@@ -366,10 +383,10 @@ class ClaudeExecutor:
                     print(warning)
                 return stdout.decode("utf-8").strip()
             else:
-                raise Exception(f"Exit code {result.returncode}: {stderr.decode()}")
+                raise Exception(f"Exit code {proc.returncode}: {stderr.decode()}")
 
         except asyncio.TimeoutError:
-            raise Exception("Timeout")
+            raise Exception("Timeout (120s)")
 
 
 # ============================================
@@ -603,6 +620,7 @@ class DiscordBot(discord.Client):
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
         self._channel_sessions: Dict[int, str] = {}  # channel_id -> session_id
+        self._channel_locks: Dict[int, asyncio.Lock] = {}  # channel_id -> lock
 
     async def on_ready(self):
         print(f"🤖 Discord 봇 로그인: {self.user}")
@@ -641,18 +659,25 @@ class DiscordBot(discord.Client):
                 return
 
         try:
-            # Get or create a persistent session for this channel
+            # Get or create a persistent session and lock for this channel
             channel_id = message.channel.id
             if channel_id not in self._channel_sessions:
                 self._channel_sessions[channel_id] = str(uuid.uuid4())
+            if channel_id not in self._channel_locks:
+                self._channel_locks[channel_id] = asyncio.Lock()
             session_id = self._channel_sessions[channel_id]
 
-            async with message.channel.typing():
-                response = await self.claude.execute(user_message, session_id=session_id)
+            async with self._channel_locks[channel_id]:
+                async with message.channel.typing():
+                    try:
+                        response = await self.claude.execute(user_message, session_id=session_id)
+                    except UsageLimitExceeded:
+                        await asyncio.sleep(CONFIG["usage_limits"]["min_call_interval_seconds"])
+                        response = await self.claude.execute(user_message, session_id=session_id)
 
-            # Split long messages (Discord 2000 char limit)
-            for chunk in self._split_message(response):
-                await message.channel.send(chunk)
+                # Split long messages (Discord 2000 char limit)
+                for chunk in self._split_message(response):
+                    await message.channel.send(chunk)
         except Exception as e:
             await message.channel.send(f"오류가 발생했습니다: {e}")
 
@@ -1015,7 +1040,20 @@ async def think():
 @app.post("/webhook/github")
 async def github_webhook(request: Request):
     """Receive GitHub webhook events and push to event queue"""
-    body = await request.json()
+    raw_body = await request.body()
+
+    # HMAC-SHA256 signature verification
+    secret = CONFIG["github_webhook_secret"]
+    if secret:
+        signature_header = request.headers.get("X-Hub-Signature-256", "")
+        expected_sig = "sha256=" + hmac.new(
+            secret.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected_sig, signature_header):
+            print(f"⚠️ GitHub webhook signature mismatch")
+            raise HTTPException(status_code=403, detail="Invalid signature")
+
+    body = json.loads(raw_body)
     gh_event = request.headers.get("X-GitHub-Event", "unknown")
 
     event_map = {
@@ -1144,6 +1182,10 @@ async def startup_event():
     print("🚀 자율 AI 서버 시작")
     print(f"📍 Session: {CONFIG['session_id']}")
     print(f"🧠 자율 모드: {'활성화' if CONFIG['autonomous_mode'] else '비활성화'}")
+
+    # Re-create event_queue on the running event loop
+    global event_queue
+    event_queue = asyncio.Queue()
 
     if CONFIG["autonomous_mode"]:
         print(f"👁️ File watcher + GitHub webhook (이벤트 push, 타이머 없음)")
