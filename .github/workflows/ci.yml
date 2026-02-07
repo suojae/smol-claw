@@ -1,7 +1,9 @@
 name: CI
 
 on:
-  workflow_dispatch:  # Manual trigger only
+  workflow_dispatch:  # Manual trigger
+  pull_request:       # Auto-run on PRs only
+    branches: [ main, develop ]
 
 jobs:
   test:
