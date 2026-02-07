@@ -1,17 +1,12 @@
-# Smol Claw
+# 🦞 Smol Claw 🦞
 
-```
-    (\/)
-   (o.o)
-  />   <\
- /  ___  \
-|  /   \  |
- \/     \/
-```
+<div align="center">
+  <img src="https://raw.githubusercontent.com/suojae/smol-claw/main/.github/crayfish.png" alt="Cute Crayfish" width="400"/>
 
-> My tiny, cute autonomous AI assistant
+  ### My tiny, cute autonomous AI assistant 🦞
 
-An autonomous AI server that thinks for itself and contacts you first.
+  An autonomous AI server that thinks for itself and contacts you first.
+</div>
 
 [한국어 문서](./README.ko.md)
 
