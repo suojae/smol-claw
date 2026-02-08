@@ -4,28 +4,15 @@ import asyncio
 import hashlib
 import hmac
 import json
-import os
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-# Import from the server module
-import importlib.util
-
-spec = importlib.util.spec_from_file_location(
-    "server", os.path.join(os.path.dirname(os.path.dirname(__file__)), "autonomous-ai-server.py")
-)
-server = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(server)
-
-GitFileHandler = server.GitFileHandler
-event_queue = server.event_queue
-app = server.app
-CONFIG = server.CONFIG
+from src.config import CONFIG, event_queue
+from src.watcher import GitFileHandler
+from src.webhook import format_github_event, send_direct_discord_notification
+from src.app import app, discord_bot
 
 
 def run(coro):
@@ -141,17 +128,69 @@ class TestEventQueue:
 
 class TestWebhookParsing:
     def test_github_event_types_mapped(self):
-        """Verify event type mapping logic"""
-        event_map = {
-            "pull_request_review": "pr_review",
-            "issues": "new_issue",
-            "push": "push",
-            "check_run": "ci_status",
-        }
+        """Verify event type mapping via format_github_event"""
+        etype, _, _ = format_github_event("pull_request_review", {"action": "submitted", "review": {"user": {"login": "u"}, "state": "approved", "html_url": ""}, "pull_request": {"number": 1}})
+        assert etype == "pr_review"
 
-        assert event_map["pull_request_review"] == "pr_review"
-        assert event_map["push"] == "push"
-        assert event_map.get("unknown_event", "unknown_event") == "unknown_event"
+        etype, _, _ = format_github_event("push", {"pusher": {"name": "t"}, "ref": "refs/heads/main", "commits": []})
+        assert etype == "push"
+
+        etype, _, _ = format_github_event("unknown_event", {})
+        assert etype == "unknown_event"
+
+    def test_push_event_detail(self):
+        body = {"pusher": {"name": "alice"}, "ref": "refs/heads/main", "commits": [{"id": "abc1234567", "message": "fix bug"}]}
+        etype, detail, msg = format_github_event("push", body)
+        assert etype == "push"
+        assert "alice" in detail
+        assert "main" in detail
+        assert msg is not None
+        assert "alice" in msg
+        assert "fix bug" in msg
+
+    def test_issues_event_detail(self):
+        body = {"action": "opened", "issue": {"title": "Bug report", "number": 42, "user": {"login": "bob"}, "html_url": "https://github.com/test/1"}}
+        etype, detail, msg = format_github_event("issues", body)
+        assert etype == "new_issue"
+        assert "Bug report" in detail
+        assert msg is not None
+        assert "#42" in msg
+        assert "bob" in msg
+
+    def test_issue_comment_event(self):
+        body = {"action": "created", "issue": {"number": 10}, "comment": {"user": {"login": "carol"}, "body": "Looks good!", "html_url": "https://github.com/test/c"}}
+        etype, detail, msg = format_github_event("issue_comment", body)
+        assert etype == "issue_comment"
+        assert "carol" in detail
+        assert msg is not None
+        assert "Looks good!" in msg
+
+    def test_pull_request_event(self):
+        body = {"action": "opened", "pull_request": {"number": 7, "title": "Add feature", "user": {"login": "dave"}, "html_url": "https://github.com/test/pr/7"}}
+        etype, detail, msg = format_github_event("pull_request", body)
+        assert etype == "pull_request"
+        assert "#7" in detail
+        assert msg is not None
+        assert "dave" in msg
+
+    def test_pr_review_comment_event(self):
+        body = {"action": "created", "comment": {"user": {"login": "eve"}, "body": "Nit: typo", "html_url": "https://github.com/test/rc"}, "pull_request": {"number": 5}}
+        etype, detail, msg = format_github_event("pull_request_review_comment", body)
+        assert etype == "pr_review_comment"
+        assert "eve" in detail
+        assert msg is not None
+        assert "Nit: typo" in msg
+
+    def test_check_run_no_discord_message(self):
+        """check_run should NOT produce a discord message"""
+        etype, detail, msg = format_github_event("check_run", {"action": "completed"})
+        assert etype == "ci_status"
+        assert msg is None
+
+    def test_ping_no_discord_message(self):
+        """ping event should NOT produce a discord message"""
+        etype, detail, msg = format_github_event("ping", {"zen": "test"})
+        assert msg is None
 
 
 def _sign(secret: str, body: bytes) -> str:
@@ -228,3 +267,70 @@ class TestWebhookSignatureVerification:
             assert resp.status_code == 200
         finally:
             CONFIG["github_webhook_secret"] = original
+
+
+@pytest.mark.asyncio
+class TestDirectDiscordNotification:
+    """Verify send_direct_discord_notification tries bot then webhook"""
+
+    async def test_sends_via_webhook_when_no_bot(self):
+        """When discord_bot is None, falls back to webhook URL"""
+        with patch("aiohttp.ClientSession") as mock_session_cls:
+            mock_resp = MagicMock()
+            mock_resp.status = 204
+            mock_ctx = MagicMock()
+            mock_ctx.__aenter__ = asyncio.coroutine(lambda s: mock_resp)
+            mock_ctx.__aexit__ = asyncio.coroutine(lambda s, *a: None)
+            mock_session = MagicMock()
+            mock_session.post.return_value = mock_ctx
+            mock_session.__aenter__ = asyncio.coroutine(lambda s: mock_session)
+            mock_session.__aexit__ = asyncio.coroutine(lambda s, *a: None)
+            mock_session_cls.return_value = mock_session
+
+            await send_direct_discord_notification(
+                "Test message",
+                discord_bot=None,
+                webhook_url="https://discord.com/api/webhooks/test/fake",
+            )
+            mock_session.post.assert_called_once()
+
+    async def test_webhook_endpoint_triggers_notification(self):
+        """POST to /webhook/github with a supported event fires create_task"""
+        original_secret = CONFIG["github_webhook_secret"]
+        CONFIG["github_webhook_secret"] = ""
+        try:
+            drain_queue()
+            payload = {"action": "opened", "issue": {"title": "Test", "number": 1, "user": {"login": "u"}, "html_url": ""}}
+            body = json.dumps(payload).encode()
+            with patch("asyncio.create_task") as mock_ct:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    resp = await ac.post(
+                        "/webhook/github",
+                        content=body,
+                        headers={"X-GitHub-Event": "issues", "Content-Type": "application/json"},
+                    )
+                assert resp.status_code == 200
+                mock_ct.assert_called_once()
+        finally:
+            CONFIG["github_webhook_secret"] = original_secret
+
+    async def test_check_run_does_not_trigger_notification(self):
+        """check_run should NOT fire create_task for discord"""
+        original_secret = CONFIG["github_webhook_secret"]
+        CONFIG["github_webhook_secret"] = ""
+        try:
+            drain_queue()
+            body = json.dumps({"action": "completed"}).encode()
+            with patch("asyncio.create_task") as mock_ct:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                    resp = await ac.post(
+                        "/webhook/github",
+                        content=body,
+                        headers={"X-GitHub-Event": "check_run", "Content-Type": "application/json"},
+                    )
+                assert resp.status_code == 200
+                mock_ct.assert_not_called()
+        finally:
+            CONFIG["github_webhook_secret"] = original_secret
