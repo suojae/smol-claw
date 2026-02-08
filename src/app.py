@@ -1,14 +1,11 @@
 """FastAPI application, routes, models, and startup."""
 
 import asyncio
-import hashlib
-import hmac
-import json
 import os
 from datetime import datetime
 from typing import Optional, Dict, Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -18,7 +15,6 @@ from src.executor import ClaudeExecutor
 from src.discord_bot import DiscordBot
 from src.engine import AutonomousEngine
 from src.watcher import start_file_watcher
-from src.webhook import format_github_event, send_direct_discord_notification
 from src.sns_routes import sns_router
 
 app = FastAPI(title="Autonomous AI Server")
@@ -91,43 +87,6 @@ async def think():
         return ThinkResponse(decision=decision)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/webhook/github")
-async def github_webhook(request: Request):
-    """Receive GitHub webhook events and push to event queue"""
-    raw_body = await request.body()
-
-    # HMAC-SHA256 signature verification
-    secret = CONFIG["github_webhook_secret"]
-    if secret:
-        signature_header = request.headers.get("X-Hub-Signature-256", "")
-        expected_sig = "sha256=" + hmac.new(
-            secret.encode(), raw_body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected_sig, signature_header):
-            print("GitHub webhook signature mismatch")
-            raise HTTPException(status_code=403, detail="Invalid signature")
-
-    body = json.loads(raw_body)
-    gh_event = request.headers.get("X-GitHub-Event", "unknown")
-
-    event_type, detail, discord_message = format_github_event(gh_event, body)
-
-    event_queue.put_nowait({"type": event_type, "detail": detail})
-    print(f"GitHub webhook: {event_type} — {detail}")
-
-    # Immediate Discord notification (no Claude judgement needed)
-    if discord_message:
-        asyncio.create_task(
-            send_direct_discord_notification(
-                discord_message,
-                discord_bot=discord_bot,
-                webhook_url=CONFIG.get("discord_webhook_url", ""),
-            )
-        )
-
-    return {"status": "ok", "event_type": event_type}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -225,7 +184,7 @@ async def startup_event():
     _config_module.event_queue = asyncio.Queue()
 
     if CONFIG["autonomous_mode"]:
-        print("File watcher + GitHub webhook (event push, no timer)")
+        print("File watcher (event push, no timer)")
 
         # Start OS-level file watcher (push-based)
         loop = asyncio.get_event_loop()

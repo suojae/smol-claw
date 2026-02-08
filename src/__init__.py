@@ -7,7 +7,6 @@ from src.watcher import GitFileHandler
 from src.executor import ClaudeExecutor
 from src.memory import SimpleMemory, GuardrailMemory
 from src.discord_bot import DiscordBot
-from src.webhook import format_github_event, send_direct_discord_notification
 from src.engine import AutonomousEngine
 from src.x_client import XClient, XPostResult
 from src.threads_client import ThreadsClient, ThreadsPostResult
@@ -24,8 +23,6 @@ __all__ = [
     "SimpleMemory",
     "GuardrailMemory",
     "DiscordBot",
-    "format_github_event",
-    "send_direct_discord_notification",
     "AutonomousEngine",
     "XClient",
     "XPostResult",

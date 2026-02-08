@@ -16,8 +16,6 @@ CONFIG = {
     "check_interval": 30 * 60,  # 30 minutes in seconds
     "autonomous_mode": True,
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable
-    "github_repo": os.getenv("GITHUB_REPO", ""),  # e.g. "suojae/smol-claw"
-    "github_webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
     # X (Twitter)
     "x_consumer_key": os.getenv("X_CONSUMER_KEY", ""),
     "x_consumer_secret": os.getenv("X_CONSUMER_SECRET", ""),
