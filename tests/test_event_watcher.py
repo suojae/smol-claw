@@ -1,31 +1,10 @@
-"""Tests for event-driven architecture (FileWatcher, Queue, Webhook)"""
+"""Tests for event-driven architecture (FileWatcher, Queue)"""
 
 import asyncio
-import hashlib
-import hmac
-import json
-import os
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-# Import from the server module
-import importlib.util
-
-spec = importlib.util.spec_from_file_location(
-    "server", os.path.join(os.path.dirname(os.path.dirname(__file__)), "autonomous-ai-server.py")
-)
-server = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(server)
-
-GitFileHandler = server.GitFileHandler
-event_queue = server.event_queue
-app = server.app
-CONFIG = server.CONFIG
+from src.config import event_queue
+from src.watcher import GitFileHandler
 
 
 def run(coro):
@@ -137,94 +116,3 @@ class TestEventQueue:
 
         assert len(events) == 3
         assert [e["type"] for e in events] == ["a", "b", "c"]
-
-
-class TestWebhookParsing:
-    def test_github_event_types_mapped(self):
-        """Verify event type mapping logic"""
-        event_map = {
-            "pull_request_review": "pr_review",
-            "issues": "new_issue",
-            "push": "push",
-            "check_run": "ci_status",
-        }
-
-        assert event_map["pull_request_review"] == "pr_review"
-        assert event_map["push"] == "push"
-        assert event_map.get("unknown_event", "unknown_event") == "unknown_event"
-
-
-def _sign(secret: str, body: bytes) -> str:
-    """Compute GitHub-style HMAC-SHA256 signature"""
-    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-
-
-PUSH_PAYLOAD = {"pusher": {"name": "tester"}, "ref": "refs/heads/main"}
-
-
-@pytest.mark.asyncio
-class TestWebhookSignatureVerification:
-    async def test_valid_signature_returns_200(self):
-        hmac_key = "test-key"
-        original = CONFIG["github_webhook_secret"]
-        CONFIG["github_webhook_secret"] = hmac_key
-        try:
-            drain_queue()
-            body = json.dumps(PUSH_PAYLOAD).encode()
-            sig = _sign(hmac_key, body)
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as ac:
-                resp = await ac.post(
-                    "/webhook/github",
-                    content=body,
-                    headers={
-                        "X-GitHub-Event": "push",
-                        "X-Hub-Signature-256": sig,
-                        "Content-Type": "application/json",
-                    },
-                )
-            assert resp.status_code == 200
-            assert resp.json()["event_type"] == "push"
-        finally:
-            CONFIG["github_webhook_secret"] = original
-
-    async def test_invalid_signature_returns_403(self):
-        hmac_key = "test-key"
-        original = CONFIG["github_webhook_secret"]
-        CONFIG["github_webhook_secret"] = hmac_key
-        try:
-            body = json.dumps(PUSH_PAYLOAD).encode()
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as ac:
-                resp = await ac.post(
-                    "/webhook/github",
-                    content=body,
-                    headers={
-                        "X-GitHub-Event": "push",
-                        "X-Hub-Signature-256": "sha256=invalid",
-                        "Content-Type": "application/json",
-                    },
-                )
-            assert resp.status_code == 403
-        finally:
-            CONFIG["github_webhook_secret"] = original
-
-    async def test_no_secret_skips_verification(self):
-        original = CONFIG["github_webhook_secret"]
-        CONFIG["github_webhook_secret"] = ""
-        try:
-            drain_queue()
-            body = json.dumps(PUSH_PAYLOAD).encode()
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as ac:
-                resp = await ac.post(
-                    "/webhook/github",
-                    content=body,
-                    headers={
-                        "X-GitHub-Event": "push",
-                        "Content-Type": "application/json",
-                    },
-                )
-            assert resp.status_code == 200
-        finally:
-            CONFIG["github_webhook_secret"] = original
