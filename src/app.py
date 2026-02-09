@@ -9,7 +9,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from src.config import CONFIG, event_queue
+import src.config as _config
+from src.config import CONFIG
 from src.context import ContextCollector
 from src.executor import ClaudeExecutor
 from src.discord_bot import DiscordBot
@@ -160,11 +161,11 @@ async def autonomous_loop():
     # Event-driven loop — blocks on queue.get(), wakes only on real events
     while True:
         try:
-            first_event = await event_queue.get()
+            first_event = await _config.event_queue.get()
             events = [first_event]
             # Drain any additional queued events
-            while not event_queue.empty():
-                events.append(event_queue.get_nowait())
+            while not _config.event_queue.empty():
+                events.append(_config.event_queue.get_nowait())
             event_types = [e["type"] for e in events]
             print(f"Events received: {event_types}")
             await autonomous_engine.think(events=events)
@@ -180,8 +181,7 @@ async def startup_event():
     print(f"Autonomous mode: {'enabled' if CONFIG['autonomous_mode'] else 'disabled'}")
 
     # Re-create event_queue on the running event loop
-    import src.config as _config_module
-    _config_module.event_queue = asyncio.Queue()
+    _config.event_queue = asyncio.Queue()
 
     if CONFIG["autonomous_mode"]:
         print("File watcher (event push, no timer)")

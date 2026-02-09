@@ -6,7 +6,7 @@ from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from src.config import event_queue
+import src.config as _config
 
 
 class GitFileHandler(FileSystemEventHandler):
@@ -28,7 +28,7 @@ class GitFileHandler(FileSystemEventHandler):
         self._last_event_time = now
         filename = Path(path).name
         event = {"type": "file_changed", "detail": f"{filename} {change_type}"}
-        self._loop.call_soon_threadsafe(event_queue.put_nowait, event)
+        self._loop.call_soon_threadsafe(_config.event_queue.put_nowait, event)
 
     def on_modified(self, event):
         if event.is_directory or self._should_ignore(event.src_path):
