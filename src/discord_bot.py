@@ -1,7 +1,9 @@
 """Discord bot for bidirectional communication."""
 
 import asyncio
+import json
 import os
+import uuid
 from typing import Optional, Dict, List
 
 import discord
@@ -11,15 +13,25 @@ from src.usage import UsageLimitExceeded
 from src.config import CONFIG, MODEL_ALIASES, DEFAULT_MODEL
 from src.persona import BOT_PERSONA
 
+SENTIMENT_SYSTEM_PROMPT = (
+    "사용자 메시지의 어조를 분석해서 AI 봇의 감정에 미칠 영향을 판단해라.\n"
+    "- 칭찬, 감사, 격려 → dopamine 상승\n"
+    "- 비난, 분노, 명령적 어조, 다그침 → cortisol 상승\n"
+    "- 중립적 질문 → 변화 없음\n"
+    'JSON만 반환: {"dopamine_delta": float, "cortisol_delta": float}\n'
+    "각 값 범위: -0.2 ~ 0.2"
+)
+
 
 class DiscordBot(discord.Client):
     """Discord bot for bidirectional communication with users"""
 
-    def __init__(self, claude: ClaudeExecutor):
+    def __init__(self, claude: ClaudeExecutor, hormones=None):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
         self.claude = claude
+        self.hormones = hormones
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
         self._channel_history: Dict[int, List[Dict[str, str]]] = {}  # channel_id -> conversation
@@ -47,10 +59,13 @@ class DiscordBot(discord.Client):
         user_message = message.content
         print(f"Discord message received: {user_message}")
 
-        # Handle !model command
+        # Handle commands
         content = message.content.strip()
         if content.startswith("!model"):
             await self._handle_model_command(message, content)
+            return
+        if content.startswith("!hormones"):
+            await self._handle_hormones_command(message)
             return
 
         # Guardrail: block dangerous commands
@@ -66,7 +81,16 @@ class DiscordBot(discord.Client):
                     f"Security guardrail: `{pattern}` pattern detected and blocked."
                 )
                 print(f"Guardrail blocked: {pattern}")
+                if self.hormones:
+                    self.hormones.trigger_cortisol(0.3)
                 return
+
+        # Hormone decay — prevent unbounded accumulation in Discord path
+        if self.hormones:
+            self.hormones.decay()
+
+        # Sentiment analysis — run before main response so the tone affects behavior
+        await self._analyze_sentiment(user_message)
 
         try:
             channel_id = message.channel.id
@@ -77,23 +101,36 @@ class DiscordBot(discord.Client):
             history = self._channel_history[channel_id]
 
             parts = [BOT_PERSONA]
+
+            # Inject hormone state into system prompt
+            if self.hormones:
+                params = self.hormones.get_control_params()
+                if params.persona_modifier:
+                    parts.append(params.persona_modifier)
+
             if history:
                 lines = [f"{h['role']}: {h['text']}" for h in history[-self._max_history:]]
                 parts.append("Previous conversation:\n" + "\n".join(lines))
             parts.append("Continue naturally.")
             context = "\n\n".join(parts)
 
+            # Determine effective model: hormone-based or manual selection
+            effective_model = self._current_model
+            if self.hormones:
+                params = self.hormones.get_control_params()
+                effective_model = params.model
+
             async with message.channel.typing():
                 try:
                     response = await self.claude.execute(
                         user_message, system_prompt=context,
-                        model=MODEL_ALIASES[self._current_model],
+                        model=MODEL_ALIASES[effective_model],
                     )
                 except UsageLimitExceeded:
                     await asyncio.sleep(CONFIG["usage_limits"]["min_call_interval_seconds"])
                     response = await self.claude.execute(
                         user_message, system_prompt=context,
-                        model=MODEL_ALIASES[self._current_model],
+                        model=MODEL_ALIASES[effective_model],
                     )
 
             # Save to history
@@ -106,8 +143,45 @@ class DiscordBot(discord.Client):
             # Split long messages (Discord 2000 char limit)
             for chunk in self._split_message(response):
                 await message.channel.send(chunk)
+
+            # Successful response → dopamine boost
+            if self.hormones:
+                self.hormones.trigger_dopamine(0.05)
         except Exception as e:
             await message.channel.send(f"Error: {e}")
+            if self.hormones:
+                self.hormones.trigger_cortisol(0.15)
+
+    async def _analyze_sentiment(self, user_message: str):
+        """Analyze message tone via haiku and trigger hormone changes."""
+        if not self.hormones:
+            return
+
+        try:
+            raw = await self.claude.execute(
+                user_message,
+                system_prompt=SENTIMENT_SYSTEM_PROMPT,
+                model=MODEL_ALIASES["haiku"],
+                session_id=f"sentiment-{uuid.uuid4()}",
+            )
+            # Strip markdown code fences if present
+            text = raw.strip()
+            if text.startswith("```"):
+                text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+            data = json.loads(text)
+            dopamine_delta = max(-0.2, min(0.2, float(data.get("dopamine_delta", 0))))
+            cortisol_delta = max(-0.2, min(0.2, float(data.get("cortisol_delta", 0))))
+
+            if dopamine_delta:
+                self.hormones.trigger_dopamine(dopamine_delta)
+            if cortisol_delta:
+                self.hormones.trigger_cortisol(cortisol_delta)
+
+            print(f"Sentiment analysis: dopamine={dopamine_delta:+.2f}, cortisol={cortisol_delta:+.2f}")
+        except Exception as e:
+            # Sentiment failure must never block the main response
+            print(f"Sentiment analysis skipped: {e}")
 
     async def _handle_model_command(self, message: discord.Message, content: str):
         """Handle !model command for switching Claude models."""
@@ -132,6 +206,23 @@ class DiscordBot(discord.Client):
         self._current_model = alias
         model_id = MODEL_ALIASES[alias]
         await message.channel.send(f"Model switched to **{alias}** (`{model_id}`)")
+
+    async def _handle_hormones_command(self, message: discord.Message):
+        """Handle !hormones command to show current hormone state."""
+        if not self.hormones:
+            await message.channel.send("Hormone system not active.")
+            return
+
+        status = self.hormones.get_status_dict()
+        lines = [
+            f"**Hormone Status** ({status['label']})",
+            f"Dopamine: `{status['dopamine']:.3f}`",
+            f"Cortisol: `{status['cortisol']:.3f}`",
+            f"Energy: `{status['energy']:.3f}`",
+            f"Ticks: `{status['tick_count']}`",
+            f"Model: `{status['effective_model']}`",
+        ]
+        await message.channel.send("\n".join(lines))
 
     async def send_notification(self, message: str):
         """Send a notification message to the configured channel"""

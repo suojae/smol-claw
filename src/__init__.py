@@ -7,6 +7,8 @@ from src.watcher import GitFileHandler
 from src.executor import ClaudeExecutor
 from src.memory import SimpleMemory, GuardrailMemory
 from src.persona import BOT_PERSONA
+from src.hormones import DigitalHormones, HormoneState, HormoneControlParams
+from src.hormone_memory import HormoneMemory, HormoneEpisode
 from src.discord_bot import DiscordBot
 from src.engine import AutonomousEngine
 from src.x_client import XClient, XPostResult
@@ -26,6 +28,11 @@ __all__ = [
     "SimpleMemory",
     "GuardrailMemory",
     "BOT_PERSONA",
+    "DigitalHormones",
+    "HormoneState",
+    "HormoneControlParams",
+    "HormoneMemory",
+    "HormoneEpisode",
     "DiscordBot",
     "AutonomousEngine",
     "XClient",
