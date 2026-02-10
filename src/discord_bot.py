@@ -15,11 +15,12 @@ from src.persona import BOT_PERSONA
 class DiscordBot(discord.Client):
     """Discord bot for bidirectional communication with users"""
 
-    def __init__(self, claude: ClaudeExecutor):
+    def __init__(self, claude: ClaudeExecutor, hormones=None):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(intents=intents)
         self.claude = claude
+        self.hormones = hormones
         self.notification_channel: Optional[discord.TextChannel] = None
         self.channel_id = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
         self._channel_history: Dict[int, List[Dict[str, str]]] = {}  # channel_id -> conversation
@@ -47,10 +48,13 @@ class DiscordBot(discord.Client):
         user_message = message.content
         print(f"Discord message received: {user_message}")
 
-        # Handle !model command
+        # Handle commands
         content = message.content.strip()
         if content.startswith("!model"):
             await self._handle_model_command(message, content)
+            return
+        if content.startswith("!hormones"):
+            await self._handle_hormones_command(message)
             return
 
         # Guardrail: block dangerous commands
@@ -66,6 +70,8 @@ class DiscordBot(discord.Client):
                     f"Security guardrail: `{pattern}` pattern detected and blocked."
                 )
                 print(f"Guardrail blocked: {pattern}")
+                if self.hormones:
+                    self.hormones.trigger_cortisol(0.3)
                 return
 
         try:
@@ -106,8 +112,14 @@ class DiscordBot(discord.Client):
             # Split long messages (Discord 2000 char limit)
             for chunk in self._split_message(response):
                 await message.channel.send(chunk)
+
+            # Successful response → dopamine boost
+            if self.hormones:
+                self.hormones.trigger_dopamine(0.05)
         except Exception as e:
             await message.channel.send(f"Error: {e}")
+            if self.hormones:
+                self.hormones.trigger_cortisol(0.15)
 
     async def _handle_model_command(self, message: discord.Message, content: str):
         """Handle !model command for switching Claude models."""
@@ -132,6 +144,23 @@ class DiscordBot(discord.Client):
         self._current_model = alias
         model_id = MODEL_ALIASES[alias]
         await message.channel.send(f"Model switched to **{alias}** (`{model_id}`)")
+
+    async def _handle_hormones_command(self, message: discord.Message):
+        """Handle !hormones command to show current hormone state."""
+        if not self.hormones:
+            await message.channel.send("Hormone system not active.")
+            return
+
+        status = self.hormones.get_status_dict()
+        lines = [
+            f"**Hormone Status** ({status['label']})",
+            f"Dopamine: `{status['dopamine']:.3f}`",
+            f"Cortisol: `{status['cortisol']:.3f}`",
+            f"Energy: `{status['energy']:.3f}`",
+            f"Ticks: `{status['tick_count']}`",
+            f"Model: `{status['effective_model']}`",
+        ]
+        await message.channel.send("\n".join(lines))
 
     async def send_notification(self, message: str):
         """Send a notification message to the configured channel"""
