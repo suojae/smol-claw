@@ -2,9 +2,12 @@
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.discord_bot import DiscordBot
+from src.config import MODEL_ALIASES
 
 
 def run(coro):
@@ -132,3 +135,164 @@ class TestCodeFenceStripping:
 
         mock_hormones.trigger_dopamine.assert_called_once_with(0.1)
         mock_hormones.trigger_cortisol.assert_not_called()
+
+
+# --- Helper to build a fake Discord message for on_message tests ---
+
+def _make_discord_message(bot, text="Hello"):
+    """Create a minimal mock Discord message for on_message tests."""
+    msg = MagicMock()
+    msg.content = text
+    msg.author = MagicMock()
+    msg.author.__eq__ = lambda self, other: False  # not the bot itself
+    msg.channel = MagicMock()
+    msg.channel.id = bot.channel_id or 123
+    msg.channel.send = AsyncMock()
+
+    @asynccontextmanager
+    async def fake_typing():
+        yield
+
+    msg.channel.typing = fake_typing
+    return msg
+
+
+@dataclass
+class _FakeParams:
+    model: str = "sonnet"
+    persona_modifier: str = ""
+
+
+# --- New tests: hormone → response context injection ---
+
+class TestHormoneContextInjection:
+    """Verify that hormone persona_modifier is injected into the system prompt."""
+
+    def test_persona_modifier_in_context(self):
+        mock_claude = AsyncMock()
+        mock_hormones = MagicMock()
+
+        fake_params = _FakeParams(
+            model="sonnet",
+            persona_modifier="[Emotional state: calm and focused]",
+        )
+        mock_hormones.get_control_params.return_value = fake_params
+
+        # Sentiment returns neutral
+        mock_claude.execute.side_effect = [
+            json.dumps({"dopamine_delta": 0.0, "cortisol_delta": 0.0}),
+            "Bot response",
+        ]
+
+        bot = _make_bot(mock_claude, mock_hormones)
+        bot.channel_id = 123
+        msg = _make_discord_message(bot, "안녕하세요")
+
+        run(bot.on_message(msg))
+
+        # The main execute call (second call) should include persona_modifier
+        main_call = mock_claude.execute.call_args_list[1]
+        system_prompt = main_call.kwargs.get("system_prompt", main_call.args[1] if len(main_call.args) > 1 else "")
+        assert "[Emotional state: calm and focused]" in system_prompt
+
+    def test_empty_persona_modifier_not_injected(self):
+        mock_claude = AsyncMock()
+        mock_hormones = MagicMock()
+
+        fake_params = _FakeParams(model="sonnet", persona_modifier="")
+        mock_hormones.get_control_params.return_value = fake_params
+
+        mock_claude.execute.side_effect = [
+            json.dumps({"dopamine_delta": 0.0, "cortisol_delta": 0.0}),
+            "Bot response",
+        ]
+
+        bot = _make_bot(mock_claude, mock_hormones)
+        bot.channel_id = 123
+        msg = _make_discord_message(bot, "test")
+
+        run(bot.on_message(msg))
+
+        # system_prompt should NOT contain double newlines from empty modifier
+        main_call = mock_claude.execute.call_args_list[1]
+        system_prompt = main_call.kwargs.get("system_prompt", main_call.args[1] if len(main_call.args) > 1 else "")
+        # Should go straight from BOT_PERSONA to "Continue naturally."
+        assert "\n\n\n\n" not in system_prompt
+
+
+class TestHormoneModelSelection:
+    """Verify that hormone-based model overrides the manual selection."""
+
+    def test_hormone_model_used(self):
+        mock_claude = AsyncMock()
+        mock_hormones = MagicMock()
+
+        fake_params = _FakeParams(model="haiku", persona_modifier="stressed")
+        mock_hormones.get_control_params.return_value = fake_params
+
+        mock_claude.execute.side_effect = [
+            json.dumps({"dopamine_delta": 0.0, "cortisol_delta": 0.0}),
+            "Bot response",
+        ]
+
+        bot = _make_bot(mock_claude, mock_hormones)
+        bot.channel_id = 123
+        bot._current_model = "sonnet"  # manual selection = sonnet
+        msg = _make_discord_message(bot, "test")
+
+        run(bot.on_message(msg))
+
+        main_call = mock_claude.execute.call_args_list[1]
+        used_model = main_call.kwargs.get("model", "")
+        assert used_model == MODEL_ALIASES["haiku"]
+
+    def test_manual_model_when_no_hormones(self):
+        mock_claude = AsyncMock()
+
+        mock_claude.execute.return_value = "Bot response"
+
+        bot = _make_bot(mock_claude, hormones=None)
+        bot.channel_id = 123
+        bot._current_model = "opus"
+        msg = _make_discord_message(bot, "test")
+
+        run(bot.on_message(msg))
+
+        main_call = mock_claude.execute.call_args_list[0]
+        used_model = main_call.kwargs.get("model", "")
+        assert used_model == MODEL_ALIASES["opus"]
+
+
+class TestHormoneDecay:
+    """Verify that decay() is called once per message."""
+
+    def test_decay_called_per_message(self):
+        mock_claude = AsyncMock()
+        mock_hormones = MagicMock()
+
+        fake_params = _FakeParams(model="sonnet", persona_modifier="")
+        mock_hormones.get_control_params.return_value = fake_params
+
+        mock_claude.execute.side_effect = [
+            json.dumps({"dopamine_delta": 0.0, "cortisol_delta": 0.0}),
+            "Bot response",
+        ]
+
+        bot = _make_bot(mock_claude, mock_hormones)
+        bot.channel_id = 123
+        msg = _make_discord_message(bot, "test")
+
+        run(bot.on_message(msg))
+
+        mock_hormones.decay.assert_called_once()
+
+    def test_no_decay_without_hormones(self):
+        mock_claude = AsyncMock()
+        mock_claude.execute.return_value = "Bot response"
+
+        bot = _make_bot(mock_claude, hormones=None)
+        bot.channel_id = 123
+        msg = _make_discord_message(bot, "test")
+
+        run(bot.on_message(msg))
+        # No crash — just verify it ran without error
