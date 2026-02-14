@@ -10,16 +10,40 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MODEL_ALIASES = {
-    "opus":   "claude-opus-4-6",
-    "sonnet": "claude-sonnet-4-5-20250929",
-    "haiku":  "claude-haiku-4-5-20251001",
+SUPPORTED_AI_PROVIDERS = ("claude", "codex")
+AI_PROVIDER = os.getenv("AI_PROVIDER", "claude").strip().lower()
+if AI_PROVIDER not in SUPPORTED_AI_PROVIDERS:
+    print(f"Unsupported AI_PROVIDER={AI_PROVIDER!r}, falling back to 'claude'")
+    AI_PROVIDER = "claude"
+
+MODEL_ALIASES_BY_PROVIDER = {
+    "claude": {
+        "opus": os.getenv("CLAUDE_MODEL_OPUS", "claude-opus-4-6"),
+        "sonnet": os.getenv("CLAUDE_MODEL_SONNET", "claude-sonnet-4-5-20250929"),
+        "haiku": os.getenv("CLAUDE_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
+    },
+    "codex": {
+        "opus": os.getenv("CODEX_MODEL_OPUS", "o3"),
+        "sonnet": os.getenv("CODEX_MODEL_SONNET", "gpt-5"),
+        "haiku": os.getenv("CODEX_MODEL_HAIKU", "gpt-5-mini"),
+    },
 }
-DEFAULT_MODEL = "sonnet"
+
+MODEL_ALIASES = MODEL_ALIASES_BY_PROVIDER[AI_PROVIDER]
+
+DEFAULT_MODEL = os.getenv("AI_DEFAULT_MODEL", "sonnet").strip().lower()
+if DEFAULT_MODEL not in MODEL_ALIASES:
+    fallback = "sonnet" if "sonnet" in MODEL_ALIASES else next(iter(MODEL_ALIASES))
+    print(
+        f"Unsupported AI_DEFAULT_MODEL={DEFAULT_MODEL!r} for provider={AI_PROVIDER!r}, "
+        f"falling back to {fallback!r}"
+    )
+    DEFAULT_MODEL = fallback
 
 CONFIG = {
     "port": 3000,
     "session_id": str(uuid.uuid4()),
+    "ai_provider": AI_PROVIDER,
     "check_interval": 30 * 60,  # 30 minutes in seconds
     "autonomous_mode": True,
     "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL", ""),  # Set via environment variable

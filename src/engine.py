@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List
 
 import aiohttp
 
-from src.executor import ClaudeExecutor
+from src.executor import AIExecutor
 from src.context import ContextCollector
 from src.memory import GuardrailMemory
 from src.config import CONFIG, MODEL_ALIASES
@@ -22,14 +22,14 @@ class AutonomousEngine:
 
     def __init__(
         self,
-        claude: ClaudeExecutor,
+        executor: AIExecutor,
         context_collector: ContextCollector,
         memory: Optional[GuardrailMemory] = None,
         discord_bot=None,
         hormones=None,
         hormone_memory=None,
     ):
-        self.claude = claude
+        self.executor = executor
         self.context_collector = context_collector
         self.memory = memory or GuardrailMemory()
         self.discord_bot = discord_bot
@@ -170,7 +170,7 @@ Respond in JSON."""
                 params = self.hormones.get_control_params()
                 hormone_model = MODEL_ALIASES.get(params.model)
 
-            response = await self.claude.execute(
+            response = await self.executor.execute(
                 prompt,
                 self.get_system_prompt() if is_first else None,
                 session_id=session_id,
@@ -180,7 +180,7 @@ Respond in JSON."""
             print(f"AI response: {response}")
 
             # Check usage warning and send Discord alert
-            usage_warning = self.claude.usage_tracker.get_warning()
+            usage_warning = self.executor.usage_tracker.get_warning()
             if usage_warning:
                 await self.notify_user(usage_warning)
 

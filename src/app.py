@@ -10,9 +10,9 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import src.config as _config
-from src.config import CONFIG
+from src.config import CONFIG, AI_PROVIDER
 from src.context import ContextCollector
-from src.executor import ClaudeExecutor
+from src.executor import create_executor
 from src.discord_bot import DiscordBot
 from src.engine import AutonomousEngine
 from src.hormones import DigitalHormones
@@ -25,19 +25,19 @@ app = FastAPI(title="Autonomous AI Server")
 app.include_router(sns_router)
 
 # Global instances
-claude = ClaudeExecutor()
+executor = create_executor(AI_PROVIDER)
 context_collector = ContextCollector()
-hormones = DigitalHormones(usage_tracker=claude.usage_tracker)
+hormones = DigitalHormones(usage_tracker=executor.usage_tracker)
 hormone_memory = HormoneMemory()
 discord_bot: Optional[DiscordBot] = None
 
 # Initialize Discord bot if token is configured
 _discord_token = os.getenv("DISCORD_BOT_TOKEN", "")
 if _discord_token and _discord_token != "your_token_here":
-    discord_bot = DiscordBot(claude, hormones=hormones)
+    discord_bot = DiscordBot(executor, hormones=hormones)
 
 autonomous_engine = AutonomousEngine(
-    claude, context_collector,
+    executor, context_collector,
     discord_bot=discord_bot,
     hormones=hormones,
     hormone_memory=hormone_memory,
@@ -55,6 +55,7 @@ class AskResponse(BaseModel):
 
 class StatusResponse(BaseModel):
     sessionId: str
+    aiProvider: str
     autonomousMode: bool
     lastCheck: Optional[str]
     usage: Optional[Dict[str, Any]] = None
@@ -70,7 +71,7 @@ class ThinkResponse(BaseModel):
 async def ask(request: AskRequest):
     """Manual question endpoint"""
     try:
-        response = await claude.execute(request.message, system_prompt=BOT_PERSONA)
+        response = await executor.execute(request.message, system_prompt=BOT_PERSONA)
         return AskResponse(response=response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -81,13 +82,14 @@ async def status():
     """Server status endpoint"""
     return StatusResponse(
         sessionId=CONFIG["session_id"],
+        aiProvider=AI_PROVIDER,
         autonomousMode=CONFIG["autonomous_mode"],
         lastCheck=(
             autonomous_engine.last_check.isoformat()
             if autonomous_engine.last_check
             else None
         ),
-        usage=claude.usage_tracker.get_status(),
+        usage=executor.usage_tracker.get_status(),
         hormones=hormones.get_status_dict(),
     )
 
@@ -117,7 +119,7 @@ async def root():
         else "N/A"
     )
 
-    usage = claude.usage_tracker.get_status()
+    usage = executor.usage_tracker.get_status()
     h = hormones.get_status_dict()
 
     return f"""
@@ -144,6 +146,7 @@ async def root():
 
         <div class="status">
           <p><strong>Session:</strong> {CONFIG["session_id"]}</p>
+          <p><strong>Provider:</strong> {AI_PROVIDER}</p>
           <p><strong>Autonomous mode:</strong> {'enabled' if CONFIG["autonomous_mode"] else 'disabled'}</p>
           <p><strong>Last check:</strong> {last_check}</p>
         </div>

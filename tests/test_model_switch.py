@@ -3,8 +3,8 @@
 import inspect
 from unittest.mock import MagicMock
 
-from src.config import MODEL_ALIASES, DEFAULT_MODEL
-from src.executor import ClaudeExecutor
+from src.config import MODEL_ALIASES, DEFAULT_MODEL, AI_PROVIDER
+from src.executor import ClaudeExecutor, CodexExecutor, create_executor
 from src.discord_bot import DiscordBot
 
 
@@ -18,13 +18,23 @@ def test_model_aliases_has_three_entries():
 
 def test_model_aliases_values_are_valid():
     for alias, model_id in MODEL_ALIASES.items():
-        assert model_id.startswith("claude-"), f"{alias} -> {model_id}"
+        assert isinstance(model_id, str) and model_id.strip(), f"{alias} -> {model_id}"
 
 
 def test_executor_execute_accepts_model_param():
     sig = inspect.signature(ClaudeExecutor.execute)
     assert "model" in sig.parameters
     assert sig.parameters["model"].default is None
+
+
+def test_create_executor_uses_current_provider():
+    executor = create_executor()
+    expected = CodexExecutor if AI_PROVIDER == "codex" else ClaudeExecutor
+    assert isinstance(executor, expected)
+
+
+def test_create_executor_supports_codex():
+    assert isinstance(create_executor("codex"), CodexExecutor)
 
 
 def test_discord_bot_initial_model():

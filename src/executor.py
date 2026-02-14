@@ -1,15 +1,34 @@
-"""Claude CLI executor."""
+"""LLM CLI executors."""
 
 import asyncio
+import os
+import tempfile
 import uuid
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Protocol
 
+from src.config import AI_PROVIDER
 from src.usage import UsageTracker
 
 
+class AIExecutor(Protocol):
+    """Common executor interface used by app/engine/bot."""
+
+    usage_tracker: UsageTracker
+
+    async def execute(
+        self,
+        message: str,
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Execute one completion request and return plain text output."""
+
+
 class ClaudeExecutor:
-    """Executes Claude CLI commands"""
+    """Executes Claude CLI commands."""
 
     def __init__(self):
         self.usage_tracker = UsageTracker()
@@ -21,11 +40,10 @@ class ClaudeExecutor:
         session_id: Optional[str] = None,
         model: Optional[str] = None,
     ) -> str:
-        """Execute Claude CLI command"""
-        # Check usage limits before executing
+        """Execute Claude CLI command."""
         self.usage_tracker.check_limits()
 
-        print(f"[{datetime.now().isoformat()}] Executing")
+        print(f"[{datetime.now().isoformat()}] Executing with Claude CLI")
 
         args = [
             "claude",
@@ -72,8 +90,107 @@ class ClaudeExecutor:
                 if warning:
                     print(warning)
                 return stdout.decode("utf-8").strip()
-            else:
-                raise Exception(f"Exit code {proc.returncode}: {stderr.decode()}")
+
+            raise Exception(f"Exit code {proc.returncode}: {stderr.decode()}")
 
         except asyncio.TimeoutError:
             raise Exception("Timeout (120s)")
+
+
+class CodexExecutor:
+    """Executes Codex CLI commands."""
+
+    def __init__(self):
+        self.usage_tracker = UsageTracker()
+
+    @staticmethod
+    def _compose_prompt(message: str, system_prompt: Optional[str]) -> str:
+        if not system_prompt:
+            return message
+        return (
+            "System instructions:\n"
+            f"{system_prompt}\n\n"
+            "User message:\n"
+            f"{message}"
+        )
+
+    async def execute(
+        self,
+        message: str,
+        system_prompt: Optional[str] = None,
+        session_id: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Execute Codex CLI command via `codex exec`."""
+        self.usage_tracker.check_limits()
+
+        if session_id:
+            # codex exec is stateless by default; keep signature compatibility.
+            print(f"Codex executor ignoring session_id={session_id}")
+
+        fd, output_path = tempfile.mkstemp(prefix="codex-last-", suffix=".txt")
+        os.close(fd)
+        out_file = Path(output_path)
+
+        args = [
+            "codex",
+            "exec",
+            "--color",
+            "never",
+            "--output-last-message",
+            output_path,
+        ]
+
+        if model:
+            args.extend(["--model", model])
+
+        args.append(self._compose_prompt(message, system_prompt))
+        print(f"[{datetime.now().isoformat()}] Executing with Codex CLI")
+
+        async def _run(cmd_args):
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_args,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            return proc, stdout, stderr
+
+        try:
+            proc, stdout, stderr = await asyncio.wait_for(_run(args), timeout=180.0)
+            if proc.returncode != 0:
+                err_text = stderr.decode("utf-8").strip() or stdout.decode("utf-8").strip()
+                raise Exception(f"Exit code {proc.returncode}: {err_text}")
+
+            response = ""
+            if out_file.exists():
+                response = out_file.read_text(encoding="utf-8").strip()
+            if not response:
+                response = stdout.decode("utf-8").strip()
+            if not response:
+                raise Exception("Codex returned empty response")
+
+            print(f"[{datetime.now().isoformat()}] Completed")
+            self.usage_tracker.record_call()
+            warning = self.usage_tracker.get_warning()
+            if warning:
+                print(warning)
+            return response
+        except asyncio.TimeoutError:
+            raise Exception("Timeout (180s)")
+        finally:
+            try:
+                out_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+def create_executor(provider: Optional[str] = None) -> AIExecutor:
+    """Create an executor for the selected provider."""
+    selected = (provider or AI_PROVIDER).strip().lower()
+    if selected == "claude":
+        return ClaudeExecutor()
+    if selected == "codex":
+        return CodexExecutor()
+    raise ValueError(f"Unsupported provider: {selected}")
