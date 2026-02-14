@@ -1,6 +1,7 @@
 """Memory management system."""
 
 import json
+import sys
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta
@@ -26,7 +27,7 @@ class SimpleMemory:
             with open(self.decisions_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"Failed to load decisions: {e}")
+            print(f"Failed to load decisions: {e}", file=sys.stderr)
             return []
 
     def save_decisions(self, decisions: List[Dict[str, Any]]):
@@ -35,7 +36,7 @@ class SimpleMemory:
             with open(self.decisions_file, "w", encoding="utf-8") as f:
                 json.dump(decisions, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"Failed to save decisions: {e}")
+            print(f"Failed to save decisions: {e}", file=sys.stderr)
 
     def load_summary(self) -> str:
         """Load summary from text file"""
@@ -51,7 +52,7 @@ class SimpleMemory:
         try:
             self.summary_file.write_text(summary, encoding="utf-8")
         except Exception as e:
-            print(f"Failed to save summary: {e}")
+            print(f"Failed to save summary: {e}", file=sys.stderr)
 
     def add_decision(self, decision: Dict[str, Any]):
         """Add a new decision and auto-manage memory"""
@@ -73,7 +74,7 @@ class SimpleMemory:
             # Create simple summary
             summary = self._create_summary(old_decisions)
             self.save_summary(summary)
-            print(f"Created summary of {len(old_decisions)} old decisions")
+            print(f"Created summary of {len(old_decisions)} old decisions", file=sys.stderr)
 
         self.save_decisions(decisions)
 
@@ -125,7 +126,7 @@ class SimpleMemory:
                 if decision_time > yesterday:
                     prev_message = d.get("message", "")
                     if self._similarity(message, prev_message) > 0.85:
-                        print(f"Skipping duplicate: '{message[:50]}...'")
+                        print(f"Skipping duplicate: '{message[:50]}...'", file=sys.stderr)
                         return True
             except Exception:
                 continue
@@ -173,7 +174,7 @@ class GuardrailMemory(SimpleMemory):
             with open(self.violations_file, "w", encoding="utf-8") as f:
                 json.dump(violations, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"Failed to save violations: {e}")
+            print(f"Failed to save violations: {e}", file=sys.stderr)
 
     def record_violation(self, violation_type: str, target: str, reason: str):
         """Record a guardrail violation"""
@@ -191,7 +192,7 @@ class GuardrailMemory(SimpleMemory):
         violations.append(violation_entry)
         self.save_violations(violations)
 
-        print(f"Guardrail violation recorded: {violation_type} on {target}")
+        print(f"Guardrail violation recorded: {violation_type} on {target}", file=sys.stderr)
 
     def get_safety_context(self) -> str:
         """Get security context for AI"""

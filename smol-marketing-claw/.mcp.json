@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "smol-claw": {
+      "type": "stdio",
+      "command": "/opt/homebrew/bin/python3.13",
+      "args": ["-m", "server.mcp_server"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}/.."
+      }
+    }
+  }
+}

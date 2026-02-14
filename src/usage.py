@@ -1,11 +1,27 @@
 """Usage tracking and rate limiting."""
 
 import json
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from src.config import CONFIG
+DEFAULT_USAGE_LIMITS = {
+    "max_calls_per_minute": 5,
+    "max_calls_per_hour": 20,
+    "max_calls_per_day": 500,
+    "min_call_interval_seconds": 5,
+    "warning_threshold_pct": 80,
+    "paused": False,
+}
+
+# Lazy import: if CONFIG is available, use its usage_limits as default
+def _get_default_limits() -> Dict[str, Any]:
+    try:
+        from src.config import CONFIG
+        return CONFIG["usage_limits"]
+    except Exception:
+        return dict(DEFAULT_USAGE_LIMITS)
 
 
 class UsageLimitExceeded(Exception):
@@ -16,9 +32,14 @@ class UsageLimitExceeded(Exception):
 class UsageTracker:
     """Tracks Claude CLI call usage and enforces rate limits"""
 
-    def __init__(self, usage_file: str = "memory/usage.json"):
+    def __init__(
+        self,
+        usage_file: str = "memory/usage.json",
+        limits: Optional[Dict[str, Any]] = None,
+    ):
         self.usage_file = Path(usage_file)
         self.usage_file.parent.mkdir(exist_ok=True)
+        self.limits = limits if limits is not None else _get_default_limits()
         self._data = self._load()
 
     def _load(self) -> Dict[str, Any]:
@@ -37,7 +58,7 @@ class UsageTracker:
             with open(self.usage_file, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"Failed to save usage data: {e}")
+            print(f"Failed to save usage data: {e}", file=sys.stderr)
 
     def _calls_since(self, seconds: float) -> int:
         """Count calls within the last N seconds"""
@@ -51,13 +72,11 @@ class UsageTracker:
 
     def check_limits(self):
         """Check all usage limits before a call. Raises UsageLimitExceeded if any limit is hit."""
-        limits = CONFIG["usage_limits"]
+        limits = self.limits
 
-        # Check if paused
         if limits.get("paused", False):
             raise UsageLimitExceeded("Usage is paused by configuration")
 
-        # Check minimum interval (cooldown)
         min_interval = limits["min_call_interval_seconds"]
         if self._data["calls"]:
             last_call = self._data["calls"][-1]
@@ -68,21 +87,18 @@ class UsageTracker:
                     f"(min interval: {min_interval}s)"
                 )
 
-        # Check per-minute limit
         per_minute = self._calls_since(60)
         if per_minute >= limits["max_calls_per_minute"]:
             raise UsageLimitExceeded(
                 f"Per-minute limit reached: {per_minute}/{limits['max_calls_per_minute']}"
             )
 
-        # Check per-hour limit
         per_hour = self._calls_since(3600)
         if per_hour >= limits["max_calls_per_hour"]:
             raise UsageLimitExceeded(
                 f"Per-hour limit reached: {per_hour}/{limits['max_calls_per_hour']}"
             )
 
-        # Check daily limit
         per_day = self._calls_since(86400)
         if per_day >= limits["max_calls_per_day"]:
             raise UsageLimitExceeded(
@@ -98,7 +114,7 @@ class UsageTracker:
 
     def get_warning(self) -> Optional[str]:
         """Return a warning message if daily usage exceeds the threshold percentage"""
-        limits = CONFIG["usage_limits"]
+        limits = self.limits
         per_day = self._calls_since(86400)
         threshold = limits["max_calls_per_day"] * limits["warning_threshold_pct"] / 100
 
@@ -110,8 +126,8 @@ class UsageTracker:
         return None
 
     def get_status(self) -> Dict[str, Any]:
-        """Return current usage stats for the /status endpoint"""
-        limits = CONFIG["usage_limits"]
+        """Return current usage stats"""
+        limits = self.limits
         per_minute = self._calls_since(60)
         per_hour = self._calls_since(3600)
         per_day = self._calls_since(86400)

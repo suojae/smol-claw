@@ -1,6 +1,7 @@
 """Digital hormone system — 3-axis emotional state for AI behavior control."""
 
 import json
+import sys
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
@@ -70,7 +71,7 @@ class DigitalHormones:
             with open(self.state_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            print(f"Failed to save hormone state: {e}")
+            print(f"Failed to save hormone state: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Decay

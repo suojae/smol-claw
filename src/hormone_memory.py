@@ -1,5 +1,6 @@
 """Vector DB-based emotional episode memory using ChromaDB + Sentence-Transformers."""
 
+import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -56,7 +57,8 @@ class HormoneMemory:
         if not VECTOR_DB_AVAILABLE:
             print(
                 "HormoneMemory disabled: "
-                "chromadb or sentence-transformers not installed"
+                "chromadb or sentence-transformers not installed",
+                file=sys.stderr,
             )
             return
 
@@ -68,9 +70,9 @@ class HormoneMemory:
                 metadata={"hnsw:space": "cosine"},
             )
             self.enabled = True
-            print(f"HormoneMemory initialized ({persist_dir})")
+            print(f"HormoneMemory initialized ({persist_dir})", file=sys.stderr)
         except Exception as e:
-            print(f"HormoneMemory init failed (falling back to no-op): {e}")
+            print(f"HormoneMemory init failed (falling back to no-op): {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Record
@@ -102,7 +104,7 @@ class HormoneMemory:
                 ],
             )
         except Exception as e:
-            print(f"HormoneMemory record failed: {e}")
+            print(f"HormoneMemory record failed: {e}", file=sys.stderr)
 
     # ------------------------------------------------------------------
     # Recall
@@ -144,7 +146,7 @@ class HormoneMemory:
                     )
             return episodes
         except Exception as e:
-            print(f"HormoneMemory recall failed: {e}")
+            print(f"HormoneMemory recall failed: {e}", file=sys.stderr)
             return []
 
     # ------------------------------------------------------------------

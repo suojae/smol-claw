@@ -1,10 +1,22 @@
-"""Tests for event-driven architecture (FileWatcher, Queue)"""
+"""Tests for event-driven architecture (FileWatcher, Queue)
+
+NOTE: These tests are for the legacy FastAPI event queue system.
+The MCP plugin uses hooks instead. Skipped when event_queue is unavailable.
+"""
 
 import asyncio
 from unittest.mock import MagicMock
 
-from src.config import event_queue
-from src.watcher import GitFileHandler
+import pytest
+
+try:
+    from src.config import event_queue
+    from src.watcher import GitFileHandler
+    _HAS_EVENT_QUEUE = True
+except ImportError:
+    _HAS_EVENT_QUEUE = False
+
+pytestmark = pytest.mark.skipif(not _HAS_EVENT_QUEUE, reason="event_queue removed in MCP plugin migration")
 
 
 def run(coro):
