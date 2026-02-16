@@ -1,9 +1,15 @@
-"""MCP tools for SNS posting (X/Twitter and Threads)."""
+"""MCP tools for SNS posting (X/Twitter and Threads).
+
+Adds manual-approval guardrail: when `CONFIG["require_manual_approval"]`
+is true, posts are queued and require explicit approval.
+"""
 
 from typing import Callable, Awaitable
 
 from server.mcp_server import mcp
 from server.state import get_state
+from src.config import CONFIG
+from src.approval import enqueue_post
 
 
 async def _execute_sns_action(
@@ -43,6 +49,8 @@ async def smol_claw_post_x(text: str) -> dict:
         text: The tweet text (max 280 characters, auto-truncated).
     """
     state = get_state()
+    if CONFIG.get("require_manual_approval", True):
+        return await enqueue_post("x", "post", text)
     return await _execute_sns_action(
         client=state.x_client,
         action_fn=lambda: state.x_client.post(text),
@@ -60,6 +68,8 @@ async def smol_claw_reply_x(text: str, tweet_id: str) -> dict:
         tweet_id: The ID of the tweet to reply to.
     """
     state = get_state()
+    if CONFIG.get("require_manual_approval", True):
+        return await enqueue_post("x", "reply", text, meta={"tweet_id": tweet_id})
     return await _execute_sns_action(
         client=state.x_client,
         action_fn=lambda: state.x_client.reply(text, tweet_id),
@@ -76,6 +86,8 @@ async def smol_claw_post_threads(text: str) -> dict:
         text: The post text (max 500 characters, auto-truncated).
     """
     state = get_state()
+    if CONFIG.get("require_manual_approval", True):
+        return await enqueue_post("threads", "post", text)
     return await _execute_sns_action(
         client=state.threads_client,
         action_fn=lambda: state.threads_client.post(text),
@@ -93,6 +105,8 @@ async def smol_claw_reply_threads(text: str, post_id: str) -> dict:
         post_id: The ID of the Threads post to reply to.
     """
     state = get_state()
+    if CONFIG.get("require_manual_approval", True):
+        return await enqueue_post("threads", "reply", text, meta={"post_id": post_id})
     return await _execute_sns_action(
         client=state.threads_client,
         action_fn=lambda: state.threads_client.reply(text, post_id),
