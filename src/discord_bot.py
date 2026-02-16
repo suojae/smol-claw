@@ -13,6 +13,7 @@ from src.executor import AIExecutor
 from src.usage import UsageLimitExceeded
 from src.config import CONFIG, MODEL_ALIASES, DEFAULT_MODEL
 from src.persona import BOT_PERSONA
+from src.approval import approve_and_execute, reject, list_pending
 
 SENTIMENT_SYSTEM_PROMPT = (
     "사용자 메시지의 어조를 분석해서 AI 봇의 감정에 미칠 영향을 판단해라.\n"
@@ -85,6 +86,15 @@ class DiscordBot(discord.Client):
             return
         if content.startswith("!hormones"):
             await self._handle_hormones_command(message)
+            return
+        if content.startswith("!queue"):
+            await self._handle_queue_command(message)
+            return
+        if content.startswith("!approve"):
+            await self._handle_approve_command(message, content)
+            return
+        if content.startswith("!reject"):
+            await self._handle_reject_command(message, content)
             return
 
         # Guardrail: block dangerous commands
@@ -242,6 +252,47 @@ class DiscordBot(discord.Client):
             f"Model: `{status['effective_model']}`",
         ]
         await message.channel.send("\n".join(lines))
+
+    async def _handle_queue_command(self, message: discord.Message):
+        """List pending approval items."""
+        items = list_pending()
+        if not items:
+            await message.channel.send("No pending posts.")
+            return
+        lines = ["**Pending approvals**"]
+        for r in items[:10]:
+            preview = (r.get("text") or "").replace("\n", " ")
+            if len(preview) > 70:
+                preview = preview[:67] + "..."
+            lines.append(f"`{r['id']}` · {r['platform']}/{r['action']} · {preview}")
+        await message.channel.send("\n".join(lines))
+
+    async def _handle_approve_command(self, message: discord.Message, content: str):
+        parts = content.split()
+        if len(parts) < 2:
+            await message.channel.send("Usage: `!approve <id>`")
+            return
+        rec_id = parts[1].strip()
+        await message.channel.trigger_typing()
+        res = await approve_and_execute(rec_id)
+        if res.get("success"):
+            msg = f"Approved and posted. id=`{rec_id}` post_id=`{res.get('post_id','')}`"
+        else:
+            msg = f"Approve failed: {res.get('error','unknown')} (id=`{rec_id}`)"
+        await message.channel.send(msg)
+
+    async def _handle_reject_command(self, message: discord.Message, content: str):
+        parts = content.split()
+        if len(parts) < 2:
+            await message.channel.send("Usage: `!reject <id>`")
+            return
+        rec_id = parts[1].strip()
+        res = reject(rec_id)
+        if res.get("success"):
+            msg = f"Rejected id=`{rec_id}`"
+        else:
+            msg = f"Reject failed: {res.get('error','unknown')} (id=`{rec_id}`)"
+        await message.channel.send(msg)
 
     async def send_notification(self, message: str):
         """Send a notification message to the configured channel"""
