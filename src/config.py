@@ -25,9 +25,9 @@ MODEL_ALIASES_BY_PROVIDER = {
         "haiku": os.getenv("CLAUDE_MODEL_HAIKU", "claude-haiku-4-5-20251001"),
     },
     "codex": {
-        "opus": os.getenv("CODEX_MODEL_OPUS", "o3"),
-        "sonnet": os.getenv("CODEX_MODEL_SONNET", "gpt-5"),
-        "haiku": os.getenv("CODEX_MODEL_HAIKU", "gpt-5-mini"),
+        "opus": os.getenv("CODEX_MODEL_OPUS", "gpt-5.3-codex"),
+        "sonnet": os.getenv("CODEX_MODEL_SONNET", "gpt-5.3-codex"),
+        "haiku": os.getenv("CODEX_MODEL_HAIKU", "gpt-5.3-codex-mini"),
     },
 }
 
@@ -66,13 +66,17 @@ CONFIG = {
     "news_x_bearer_token": os.getenv("NEWS_X_BEARER_TOKEN", ""),
     # Usage limits
     "usage_limits": {
-        "max_calls_per_minute": 5,
-        "max_calls_per_hour": 20,
-        "max_calls_per_day": 500,
-        "min_call_interval_seconds": 5,
+        "max_calls_per_minute": 60,
+        "max_calls_per_hour": 500,
+        "max_calls_per_day": 10000,
+        "min_call_interval_seconds": 1,
         "warning_threshold_pct": 80,
         "paused": False,
     },
+    # Posting guardrail — require explicit human approval before publishing
+    # Set REQUIRE_MANUAL_APPROVAL=false to bypass (not recommended)
+    "require_manual_approval": os.getenv("REQUIRE_MANUAL_APPROVAL", "true").strip().lower()
+    in ("1", "true", "yes", "on"),
 }
 
 # Discord multi-bot channel IDs
