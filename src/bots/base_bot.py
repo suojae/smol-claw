@@ -1,17 +1,34 @@
 """Base class for all marketing bots."""
 
+import re
 import sys
 from collections import OrderedDict
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
 
 import discord
 
-from src.config import MODEL_ALIASES, DEFAULT_MODEL
+from src.config import CONFIG, MODEL_ALIASES, DEFAULT_MODEL
 from src.executor import AIExecutor
 
 
 def _log(msg: str):
     print(msg, file=sys.stderr)
+
+
+# Action block regex: [ACTION:TYPE] ... [/ACTION]
+_ACTION_RE = re.compile(
+    r"\[ACTION:(\w+)\]\s*(.*?)\s*\[/ACTION\]",
+    re.DOTALL,
+)
+
+# Map ACTION codes → (platform, action_kind)
+_ACTION_MAP: Dict[str, tuple] = {
+    "POST_THREADS": ("threads", "post"),
+    "POST_LINKEDIN": ("linkedin", "post"),
+    "POST_INSTAGRAM": ("instagram", "post"),
+    "POST_X": ("x", "post"),
+    "SEARCH_NEWS": ("news", "search"),
+}
 
 
 class BaseMarketingBot(discord.Client):
@@ -20,6 +37,7 @@ class BaseMarketingBot(discord.Client):
     Handles:
     - 1:1 channel: responds to all user messages
     - #team-room: responds only when @mentioned (by user or other bots)
+    - LLM action blocks: [ACTION:TYPE]...[/ACTION] → SNS execution
     """
 
     _MAX_CHANNELS = 20  # LRU eviction threshold for channel history
@@ -31,6 +49,7 @@ class BaseMarketingBot(discord.Client):
         own_channel_id: int,
         team_channel_id: int,
         executor: Optional[AIExecutor] = None,
+        clients: Optional[Dict[str, Any]] = None,
     ):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -41,6 +60,7 @@ class BaseMarketingBot(discord.Client):
         self.own_channel_id = own_channel_id
         self.team_channel_id = team_channel_id
         self.executor = executor
+        self._clients: Dict[str, Any] = clients or {}
         self._channel_history: OrderedDict[int, List[Dict[str, str]]] = OrderedDict()
         self._max_history = 10
         self._current_model: str = DEFAULT_MODEL
@@ -72,7 +92,7 @@ class BaseMarketingBot(discord.Client):
             await self._respond(message)
 
     async def _respond(self, message: discord.Message):
-        """Generate and send a response."""
+        """Generate and send a response, executing any action blocks."""
         user_message = message.content
         # Remove bot mention from message text for cleaner processing
         if self.user:
@@ -119,13 +139,99 @@ class BaseMarketingBot(discord.Client):
             if len(history) > self._max_history * 2:
                 self._channel_history[channel_id] = history[-self._max_history * 2:]
 
-            # Split long messages (Discord 2000 char limit)
-            for chunk in self._split_message(response):
-                await message.channel.send(chunk)
+            # Parse action blocks from LLM response
+            actions = _ACTION_RE.findall(response)
+            plain_text = _ACTION_RE.sub("", response).strip()
+
+            # Send plain text first
+            if plain_text:
+                for chunk in self._split_message(plain_text):
+                    await message.channel.send(chunk)
+
+            # Execute actions
+            for action_type, action_body in actions:
+                result = await self._execute_action(action_type, action_body.strip())
+                if result:
+                    await message.channel.send(result)
 
         except Exception as e:
             _log(f"[{self.bot_name}] error: {e}")
             await message.channel.send(f"[{self.bot_name}] 에러 발생: {e}")
+
+    @staticmethod
+    def _parse_instagram_body(body: str):
+        """Parse Instagram action body to extract caption and image_url."""
+        lines = body.strip().splitlines()
+        image_url = ""
+        caption_lines = []
+        for line in lines:
+            if line.strip().lower().startswith("image_url:"):
+                image_url = line.split(":", 1)[1].strip()
+            else:
+                caption_lines.append(line)
+        return "\n".join(caption_lines).strip(), image_url
+
+    async def _execute_action(self, action_type: str, body: str) -> str:
+        """Execute an action block. Respects the approval system for POST actions."""
+        mapping = _ACTION_MAP.get(action_type)
+        if not mapping:
+            return f"[{self.bot_name}] 알 수 없는 액션: {action_type}"
+
+        platform, action_kind = mapping
+
+        # SEARCH_NEWS — execute immediately, no approval needed
+        if action_type == "SEARCH_NEWS":
+            return await self._execute_search(body)
+
+        # POST actions — check approval setting
+        client = self._clients.get(platform)
+        if not client:
+            return f"[{self.bot_name}] {platform} 클라이언트가 연결되지 않았음."
+
+        # Instagram needs image_url parsed from body
+        meta = {}
+        post_text = body
+        if platform == "instagram":
+            post_text, image_url = self._parse_instagram_body(body)
+            if image_url:
+                meta["image_url"] = image_url
+
+        if CONFIG["require_manual_approval"]:
+            from src.approval import enqueue_post
+            result = await enqueue_post(platform, action_kind, post_text, meta=meta)
+            return f"[{self.bot_name}] 승인 대기 중 (ID: {result['approval_id']})"
+
+        # Direct execution (approval disabled)
+        try:
+            if platform == "instagram":
+                res = await client.post(post_text, meta.get("image_url", ""))
+            else:
+                res = await client.post(post_text)
+            if res.success:
+                return f"[{self.bot_name}] {platform} 포스팅 완료 (ID: {res.post_id})"
+            return f"[{self.bot_name}] {platform} 포스팅 실패: {res.error}"
+        except Exception as e:
+            return f"[{self.bot_name}] {platform} 포스팅 에러: {e}"
+
+    async def _execute_search(self, query: str) -> str:
+        """Execute a news search immediately."""
+        client = self._clients.get("news")
+        if not client:
+            return f"[{self.bot_name}] news 클라이언트가 연결되지 않았음."
+        try:
+            result = await client.search(query)
+            if not result.success:
+                return f"[{self.bot_name}] 뉴스 검색 실패: {result.error}"
+            if not result.items:
+                return f"[{self.bot_name}] '{query}' 검색 결과 없음."
+            lines = [f"[{self.bot_name}] '{query}' 검색 결과:"]
+            for item in result.items[:5]:
+                lines.append(f"- {item.text[:200]}")
+                if item.url:
+                    lines.append(f"  {item.url}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"[{self.bot_name}] 뉴스 검색 에러: {e}"
 
     async def send_to_team(self, text: str):
         """Send a message to the team channel."""
