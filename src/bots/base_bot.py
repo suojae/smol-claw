@@ -1,5 +1,6 @@
 """Base class for all marketing bots."""
 
+import asyncio
 import re
 import sys
 from collections import OrderedDict
@@ -29,6 +30,9 @@ _ACTION_MAP: Dict[str, tuple] = {
     "POST_X": ("x", "post"),
     "SEARCH_NEWS": ("news", "search"),
 }
+
+# Max actions per single LLM response (spam prevention)
+_MAX_ACTIONS_PER_MESSAGE = 2
 
 
 class BaseMarketingBot(discord.Client):
@@ -61,6 +65,7 @@ class BaseMarketingBot(discord.Client):
         self.team_channel_id = team_channel_id
         self.executor = executor
         self._clients: Dict[str, Any] = clients or {}
+        self._action_lock = asyncio.Lock()
         self._channel_history: OrderedDict[int, List[Dict[str, str]]] = OrderedDict()
         self._max_history = 10
         self._current_model: str = DEFAULT_MODEL
@@ -98,6 +103,9 @@ class BaseMarketingBot(discord.Client):
         if self.user:
             user_message = user_message.replace(f"<@{self.user.id}>", "").strip()
 
+        # CR #1: Strip action blocks from user input to prevent injection
+        user_message = _ACTION_RE.sub("", user_message).strip()
+
         _log(f"[{self.bot_name}] responding to: {user_message[:80]}")
 
         if not self.executor:
@@ -106,6 +114,7 @@ class BaseMarketingBot(discord.Client):
 
         try:
             channel_id = message.channel.id
+            is_team_channel = channel_id == self.team_channel_id
 
             # Build context from conversation history (LRU eviction)
             if channel_id in self._channel_history:
@@ -148,11 +157,27 @@ class BaseMarketingBot(discord.Client):
                 for chunk in self._split_message(plain_text):
                     await message.channel.send(chunk)
 
-            # Execute actions
-            for action_type, action_body in actions:
-                result = await self._execute_action(action_type, action_body.strip())
-                if result:
-                    await message.channel.send(result)
+            # CR #1: Only execute actions in team channel (not 1:1 user channels)
+            if not is_team_channel:
+                if actions:
+                    await message.channel.send(
+                        f"[{self.bot_name}] 액션은 팀 채널에서만 실행 가능함."
+                    )
+                return
+
+            # CR #2: Limit actions per message to prevent spam
+            if len(actions) > _MAX_ACTIONS_PER_MESSAGE:
+                await message.channel.send(
+                    f"[{self.bot_name}] 메시지당 최대 {_MAX_ACTIONS_PER_MESSAGE}건 액션만 실행됨."
+                )
+                actions = actions[:_MAX_ACTIONS_PER_MESSAGE]
+
+            # Execute actions with lock (CR #5: concurrency control)
+            async with self._action_lock:
+                for action_type, action_body in actions:
+                    result = await self._execute_action(action_type, action_body.strip())
+                    if result:
+                        await message.channel.send(result)
 
         except Exception as e:
             _log(f"[{self.bot_name}] error: {e}")
@@ -177,6 +202,10 @@ class BaseMarketingBot(discord.Client):
         if not mapping:
             return f"[{self.bot_name}] 알 수 없는 액션: {action_type}"
 
+        # CR #3: Reject empty action body
+        if not body:
+            return f"[{self.bot_name}] 액션 본문이 비어있음. ({action_type})"
+
         platform, action_kind = mapping
 
         # SEARCH_NEWS — execute immediately, no approval needed
@@ -193,6 +222,12 @@ class BaseMarketingBot(discord.Client):
         post_text = body
         if platform == "instagram":
             post_text, image_url = self._parse_instagram_body(body)
+            # CR #3: Reject empty caption
+            if not post_text:
+                return f"[{self.bot_name}] Instagram 캡션이 비어있음."
+            # CR #4: Validate image_url scheme (SSRF prevention)
+            if image_url and not image_url.startswith("https://"):
+                return f"[{self.bot_name}] Instagram image_url은 https:// 만 허용됨."
             if image_url:
                 meta["image_url"] = image_url
 
@@ -201,16 +236,23 @@ class BaseMarketingBot(discord.Client):
             result = await enqueue_post(platform, action_kind, post_text, meta=meta)
             return f"[{self.bot_name}] 승인 대기 중 (ID: {result['approval_id']})"
 
-        # Direct execution (approval disabled)
+        # CR #2: Audit log for direct execution (approval disabled)
+        _log(f"[{self.bot_name}] AUDIT: direct post to {platform} — "
+             f"{post_text[:100]!r}")
         try:
             if platform == "instagram":
                 res = await client.post(post_text, meta.get("image_url", ""))
             else:
                 res = await client.post(post_text)
             if res.success:
+                _log(f"[{self.bot_name}] AUDIT: posted to {platform} — "
+                     f"post_id={res.post_id}")
                 return f"[{self.bot_name}] {platform} 포스팅 완료 (ID: {res.post_id})"
+            _log(f"[{self.bot_name}] AUDIT: post failed on {platform} — "
+                 f"{res.error}")
             return f"[{self.bot_name}] {platform} 포스팅 실패: {res.error}"
         except Exception as e:
+            _log(f"[{self.bot_name}] AUDIT: post error on {platform} — {e}")
             return f"[{self.bot_name}] {platform} 포스팅 에러: {e}"
 
     async def _execute_search(self, query: str) -> str:
