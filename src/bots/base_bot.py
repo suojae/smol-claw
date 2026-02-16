@@ -46,8 +46,8 @@ class BaseMarketingBot(discord.Client):
         _log(f"[{self.bot_name}] logged in as {self.user}")
 
     async def on_message(self, message: discord.Message):
-        # Never respond to own messages
-        if message.author == self.user:
+        # Guard: self.user can be None before on_ready fires
+        if not self.user or message.author == self.user:
             return
 
         is_team_channel = message.channel.id == self.team_channel_id
@@ -121,9 +121,14 @@ class BaseMarketingBot(discord.Client):
     async def send_to_team(self, text: str):
         """Send a message to the team channel."""
         channel = self.get_channel(self.team_channel_id)
-        if channel:
+        if not channel:
+            _log(f"[{self.bot_name}] team channel {self.team_channel_id} not accessible")
+            return
+        try:
             for chunk in self._split_message(text):
                 await channel.send(chunk)
+        except Exception as e:
+            _log(f"[{self.bot_name}] send_to_team failed: {e}")
 
     @staticmethod
     def _split_message(text: str, limit: int = 2000) -> List[str]:

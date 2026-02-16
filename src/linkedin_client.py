@@ -37,6 +37,9 @@ class LinkedInClient:
             "Authorization": f"Bearer {CONFIG['linkedin_access_token']}",
         }
         async with session.get(f"{LINKEDIN_API_BASE}/userinfo", headers=headers) as resp:
+            if resp.status >= 400:
+                body = await resp.text()
+                raise RuntimeError(f"LinkedIn auth failed (HTTP {resp.status}): {body}")
             data = await resp.json()
             if "sub" not in data:
                 raise RuntimeError(f"Failed to get user info: {data}")
