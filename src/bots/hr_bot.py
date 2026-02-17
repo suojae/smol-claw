@@ -181,7 +181,7 @@ class HRBot(BaseMarketingBot):
         super().__init__(bot_name="HRBot", persona=HR_PERSONA, aliases=["HR"], **kwargs)
         self.bot_registry: Dict[str, BaseMarketingBot] = bot_registry or {}
 
-    async def _execute_action(self, action_type: str, body: str) -> str:
+    async def _execute_action(self, action_type: str, body: str, message=None) -> str:
         """Handle HR-specific actions, delegate others to base."""
         if action_type == "FIRE_BOT":
             return await fire_bot(body.strip(), self.bot_registry, self.bot_name)
@@ -189,4 +189,4 @@ class HRBot(BaseMarketingBot):
             return await hire_bot(body.strip(), self.bot_registry, self.bot_name)
         elif action_type == "STATUS_REPORT":
             return status_report(self.bot_registry, self.bot_name)
-        return await super()._execute_action(action_type, body)
+        return await super()._execute_action(action_type, body, message=message)

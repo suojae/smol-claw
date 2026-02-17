@@ -20,7 +20,7 @@ class TeamLeadBot(BaseMarketingBot):
         super().__init__(bot_name="TeamLead", persona=TEAM_LEAD_PERSONA, **kwargs)
         self.bot_registry: Dict[str, BaseMarketingBot] = bot_registry or {}
 
-    async def _execute_action(self, action_type: str, body: str) -> str:
+    async def _execute_action(self, action_type: str, body: str, message=None) -> str:
         """Handle HR actions (fire/hire/status) in addition to SNS actions."""
         if action_type in ("FIRE_BOT", "HIRE_BOT", "STATUS_REPORT"):
             from src.bots.hr_bot import fire_bot, hire_bot, status_report
@@ -30,4 +30,4 @@ class TeamLeadBot(BaseMarketingBot):
                 return await hire_bot(body.strip(), self.bot_registry, self.bot_name)
             else:
                 return status_report(self.bot_registry, self.bot_name)
-        return await super()._execute_action(action_type, body)
+        return await super()._execute_action(action_type, body, message=message)
