@@ -185,7 +185,9 @@ class BaseMarketingBot(discord.Client):
                 await message.channel.send(f"[{self.bot_name}] 응답이 취소됨.")
                 return
             finally:
-                self._active_tasks.pop(channel_id_for_task, None)
+                # Only remove if this task is still the registered one
+                if self._active_tasks.get(channel_id_for_task) is task:
+                    del self._active_tasks[channel_id_for_task]
 
             # Save to history
             history.append({"role": "user", "text": user_message})

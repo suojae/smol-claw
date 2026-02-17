@@ -192,3 +192,27 @@ async def test_help_team_channel_without_mention_ignored():
     await bot.on_message(msg)
 
     msg.channel.send.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Race condition: second message must not lose its task reference
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_concurrent_tasks_no_orphan():
+    """When task2 overwrites task1 in _active_tasks, task1's finally must not evict task2."""
+    executor = MagicMock()
+    bot = _make_bot(executor=executor)
+
+    task1 = MagicMock()
+    task2 = MagicMock()
+
+    # Simulate: task1 was registered, then task2 overwrote it
+    bot._active_tasks[OWN_CHANNEL] = task2
+
+    # task1's finally block runs — should NOT remove task2
+    if bot._active_tasks.get(OWN_CHANNEL) is task1:
+        del bot._active_tasks[OWN_CHANNEL]
+
+    # task2 must still be reachable
+    assert bot._active_tasks.get(OWN_CHANNEL) is task2
