@@ -110,7 +110,6 @@ _BOT_REGISTRY: Dict[str, BaseMarketingBot] = {}
 
 def _build_bots():
     """Instantiate all bots with their channel configs and SNS clients."""
-    global _BOT_REGISTRY
     _BOT_REGISTRY.clear()
 
     team_ch = DISCORD_CHANNELS["team"]
