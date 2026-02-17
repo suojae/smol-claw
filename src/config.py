@@ -87,6 +87,7 @@ DISCORD_CHANNELS = {
     "linkedin": int(os.getenv("DISCORD_LINKEDIN_CHANNEL_ID", "0")),
     "instagram": int(os.getenv("DISCORD_INSTAGRAM_CHANNEL_ID", "0")),
     "news": int(os.getenv("DISCORD_NEWS_CHANNEL_ID", "0")),
+    "hr": int(os.getenv("DISCORD_HR_CHANNEL_ID", "0")),
 }
 
 # Discord multi-bot tokens
@@ -96,4 +97,5 @@ DISCORD_TOKENS = {
     "linkedin": os.getenv("DISCORD_LINKEDIN_TOKEN", ""),
     "instagram": os.getenv("DISCORD_INSTAGRAM_TOKEN", ""),
     "news": os.getenv("DISCORD_NEWS_TOKEN", ""),
+    "hr": os.getenv("DISCORD_HR_TOKEN", ""),
 }
