@@ -98,6 +98,11 @@ async def hire_bot(
     return f"[{caller}] {bot_or_msg.bot_name} 채용(재활성화) 완료됨."
 
 
+# History thresholds for proactive management
+HISTORY_WARN_THRESHOLD = 10   # recommend reset
+HISTORY_FIRE_THRESHOLD = 15   # strongly recommend immediate reset
+
+
 def status_report(
     registry: Dict[str, BaseMarketingBot], caller: str = "HR",
 ) -> str:
@@ -108,6 +113,7 @@ def status_report(
     lines = [f"[{caller}] === 에이전트 현황 리포트 ==="]
     active_count = 0
     inactive_count = 0
+    warn_bots = []
 
     for key in sorted(registry.keys()):
         bot = registry[key]
@@ -120,9 +126,30 @@ def status_report(
         else:
             inactive_count += 1
 
-        lines.append(f"- {bot.bot_name} [{key}]: {status}{protected} | 히스토리: {msg_count}건")
+        # Tag bots exceeding thresholds
+        tag = ""
+        if bot._active and key not in PROTECTED_KEYS:
+            if msg_count >= HISTORY_FIRE_THRESHOLD:
+                tag = " ⚠ 즉시 리셋 권고"
+                warn_bots.append((bot.bot_name, msg_count, "critical"))
+            elif msg_count >= HISTORY_WARN_THRESHOLD:
+                tag = " △ 주의"
+                warn_bots.append((bot.bot_name, msg_count, "warn"))
+
+        lines.append(
+            f"- {bot.bot_name} [{key}]: {status}{protected} | 히스토리: {msg_count}건{tag}"
+        )
 
     lines.append(f"합계: 활성 {active_count}명, 비활성 {inactive_count}명")
+
+    if warn_bots:
+        lines.append("")
+        for name, count, level in warn_bots:
+            if level == "critical":
+                lines.append(f"→ {name}: {count}건 — 성능 저하 구간. 해고→재채용 실행 요망.")
+            else:
+                lines.append(f"→ {name}: {count}건 — 리셋 권고 대상.")
+
     return "\n".join(lines)
 
 
