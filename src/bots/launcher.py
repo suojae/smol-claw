@@ -137,11 +137,16 @@ def _build_bots():
             own_channel_id=DISCORD_CHANNELS[key],
             team_channel_id=team_ch,
             extra_team_channels=extra,
-            executor=_create_executor(),  # independent executor per bot
+            executor=_create_executor(),
             clients={k: v for k, v in sns.items() if k in allowed_sns},
         )
         _BOT_REGISTRY[key] = bot
         bots.append((bot, token))
+
+    # Inject bot_registry into TeamLead (for fire/hire authority)
+    lead_bot = _BOT_REGISTRY.get("lead")
+    if lead_bot is not None:
+        lead_bot.bot_registry = _BOT_REGISTRY
 
     # HR — created last, receives bot_registry reference
     token = DISCORD_TOKENS["hr"]
