@@ -78,6 +78,8 @@ class BaseMarketingBot(discord.Client):
         self._active: bool = True
         self._rehired: bool = False  # set by HR on rehire → triggers onboarding context
         self._active_tasks: Dict[int, asyncio.Task] = {}  # channel_id → running Task
+        self._bot_chain_count: Dict[int, int] = {}  # channel_id → consecutive bot reply count
+        self._max_bot_chain: int = 5  # max bot-to-bot replies before stopping
 
     def _is_role_mentioned(self, message: discord.Message) -> bool:
         """Check if the bot's role is mentioned (Discord converts @BotName to role mention)."""
@@ -145,10 +147,18 @@ class BaseMarketingBot(discord.Client):
         if message.author.bot:
             # Bot messages: only respond if mentioned in team channel
             if is_team_channel and is_mentioned:
+                chain = self._bot_chain_count.get(message.channel.id, 0)
+                if chain >= self._max_bot_chain:
+                    _log(f"[{self.bot_name}] bot chain limit reached ({chain}/{self._max_bot_chain}), ignoring")
+                    return
+                self._bot_chain_count[message.channel.id] = chain + 1
                 await self._respond(message)
             return
 
-        # User messages
+        # User messages — reset bot chain counter
+        if is_team_channel:
+            self._bot_chain_count[message.channel.id] = 0
+
         if is_own_channel:
             # 1:1 channel — always respond
             await self._respond(message)
@@ -367,12 +377,26 @@ class BaseMarketingBot(discord.Client):
         cancel_all = len(args) >= 2 and args[1].lower() == "all"
 
         if cancel_all:
-            # Each bot independently cancels its own tasks
-            count = self._cancel_own_tasks()
-            if count:
-                await message.channel.send(
-                    f"[{self.bot_name}] {count}건 취소됨."
-                )
+            is_team = message.channel.id in self._team_channel_ids
+            if is_team:
+                # Team channel: every bot receives !cancel all independently
+                # → each bot cancels its own tasks only (avoids duplicate cancellation)
+                count = self._cancel_own_tasks()
+                if count:
+                    await message.channel.send(f"[{self.bot_name}] {count}건 취소됨.")
+            else:
+                # 1:1 channel: only this bot receives → iterate registry for full cancel
+                registry: Dict[str, "BaseMarketingBot"] = getattr(self, "bot_registry", None) or {}
+                all_bots = list(registry.values()) if registry else [self]
+                if self not in all_bots:
+                    all_bots.append(self)
+                total = 0
+                for bot in all_bots:
+                    total += bot._cancel_own_tasks()
+                if total:
+                    await message.channel.send(f"[{self.bot_name}] 전체 취소: {total}건의 작업이 중단됨.")
+                else:
+                    await message.channel.send(f"[{self.bot_name}] 취소할 작업이 없음.")
             return
 
         channel_id = message.channel.id
@@ -412,7 +436,7 @@ class BaseMarketingBot(discord.Client):
         lines = [
             f"**[{self.bot_name}] 명령어 목록**",
             "`!cancel` — 진행 중인 응답 취소",
-            "`!cancel all` — 모든 봇의 진행 중인 작업 전체 취소",
+            "`!cancel all` — 전체 봇의 진행 중인 작업 일괄 취소",
             "`!clear` — 현재 채널 대화 기록 초기화",
             "`!clear all` — 전체 채널 대화 기록 초기화",
             "`!help` — 이 명령어 목록 표시",

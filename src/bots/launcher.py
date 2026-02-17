@@ -142,7 +142,7 @@ def _build_bots():
         _BOT_REGISTRY[key] = bot
         bots.append((bot, token))
 
-    # Inject bot_registry into all bots (needed for !cancel all + HR authority)
+    # Inject bot_registry into all bots (HR authority + !cancel all cross-bot)
     for bot_instance, _ in bots:
         bot_instance.bot_registry = _BOT_REGISTRY
 
