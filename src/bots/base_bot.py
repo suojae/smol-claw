@@ -54,6 +54,7 @@ class BaseMarketingBot(discord.Client):
         team_channel_id: int,
         executor: Optional[AIExecutor] = None,
         clients: Optional[Dict[str, Any]] = None,
+        extra_team_channels: Optional[List[int]] = None,
     ):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -62,7 +63,10 @@ class BaseMarketingBot(discord.Client):
         self.bot_name = bot_name
         self.persona = persona
         self.own_channel_id = own_channel_id
-        self.team_channel_id = team_channel_id
+        self._primary_team_channel_id = team_channel_id
+        self._team_channel_ids = {team_channel_id}
+        if extra_team_channels:
+            self._team_channel_ids.update(ch for ch in extra_team_channels if ch)
         self.executor = executor
         self._clients: Dict[str, Any] = clients or {}
         self._action_lock = asyncio.Lock()
@@ -70,6 +74,17 @@ class BaseMarketingBot(discord.Client):
         self._max_history = 10
         self._current_model: str = DEFAULT_MODEL
         self._active: bool = True
+        self._active_tasks: Dict[int, asyncio.Task] = {}  # channel_id → running Task
+
+    def _is_text_mentioned(self, content: str) -> bool:
+        """Check if bot is mentioned by @name in plain text (LLM-generated mentions)."""
+        if not self.user:
+            return False
+        names = {self.bot_name, self.user.name}
+        if self.user.display_name:
+            names.add(self.user.display_name)
+        content_lower = content.lower()
+        return any(f"@{name.lower()}" in content_lower for name in names)
 
     async def on_ready(self):
         _log(f"[{self.bot_name}] logged in as {self.user}")
@@ -86,9 +101,28 @@ class BaseMarketingBot(discord.Client):
         if not self.user or message.author == self.user:
             return
 
-        is_team_channel = message.channel.id == self.team_channel_id
+        is_team_channel = message.channel.id in self._team_channel_ids
         is_own_channel = message.channel.id == self.own_channel_id
-        is_mentioned = self.user.mentioned_in(message)
+        is_mentioned = self.user.mentioned_in(message) or self._is_text_mentioned(message.content)
+
+        # --- Command dispatch (human-only) ---
+        if not message.author.bot:
+            content_stripped = message.content.strip()
+            cmd = content_stripped.split()[0].lower() if content_stripped else ""
+
+            if cmd == "!cancel":
+                # !cancel works everywhere without mention
+                await self._handle_cancel(message)
+                return
+
+            if cmd in ("!clear", "!help"):
+                # 1:1 channel — always handle; team channel — only when mentioned
+                if is_own_channel or (is_team_channel and is_mentioned):
+                    if cmd == "!clear":
+                        await self._handle_clear(message)
+                    else:
+                        await self._handle_help(message)
+                    return
 
         if message.author.bot:
             # Bot messages: only respond if mentioned in team channel
@@ -122,7 +156,7 @@ class BaseMarketingBot(discord.Client):
 
         try:
             channel_id = message.channel.id
-            is_team_channel = channel_id == self.team_channel_id
+            is_team_channel = channel_id in self._team_channel_ids
 
             # Build context from conversation history (LRU eviction)
             if channel_id in self._channel_history:
@@ -143,12 +177,25 @@ class BaseMarketingBot(discord.Client):
             parts.append("Continue naturally.")
             context = "\n\n".join(parts)
 
-            async with message.channel.typing():
-                response = await self.executor.execute(
+            channel_id_for_task = message.channel.id
+            task = asyncio.create_task(
+                self.executor.execute(
                     user_message,
                     system_prompt=context,
                     model=MODEL_ALIASES[self._current_model],
                 )
+            )
+            self._active_tasks[channel_id_for_task] = task
+            try:
+                async with message.channel.typing():
+                    response = await task
+            except asyncio.CancelledError:
+                await message.channel.send(f"[{self.bot_name}] 응답이 취소됨.")
+                return
+            finally:
+                # Only remove if this task is still the registered one
+                if self._active_tasks.get(channel_id_for_task) is task:
+                    del self._active_tasks[channel_id_for_task]
 
             # Save to history
             history.append({"role": "user", "text": user_message})
@@ -283,11 +330,47 @@ class BaseMarketingBot(discord.Client):
         except Exception as e:
             return f"[{self.bot_name}] 뉴스 검색 에러: {e}"
 
+    async def _handle_cancel(self, message: discord.Message):
+        """Cancel the active LLM task for this channel, if any."""
+        channel_id = message.channel.id
+        task = self._active_tasks.get(channel_id)
+        if task and not task.done():
+            task.cancel()
+            # The CancelledError handler in _respond sends the user-facing message.
+        else:
+            # In team channels, stay silent to avoid 5-bot noise.
+            # In 1:1 channels, inform the user.
+            if channel_id == self.own_channel_id:
+                await message.channel.send(f"[{self.bot_name}] 취소할 작업이 없음.")
+
+    async def _handle_clear(self, message: discord.Message):
+        """Clear conversation history. `!clear` = current channel, `!clear all` = all."""
+        args = message.content.strip().split()
+        if len(args) >= 2 and args[1].lower() == "all":
+            self._channel_history.clear()
+            await message.channel.send(f"[{self.bot_name}] 전체 대화 기록 초기화됨.")
+        else:
+            channel_id = message.channel.id
+            if channel_id in self._channel_history:
+                del self._channel_history[channel_id]
+            await message.channel.send(f"[{self.bot_name}] 이 채널 대화 기록 초기화됨.")
+
+    async def _handle_help(self, message: discord.Message):
+        """Show available commands."""
+        lines = [
+            f"**[{self.bot_name}] 명령어 목록**",
+            "`!cancel` — 진행 중인 응답 취소",
+            "`!clear` — 현재 채널 대화 기록 초기화",
+            "`!clear all` — 전체 채널 대화 기록 초기화",
+            "`!help` — 이 명령어 목록 표시",
+        ]
+        await message.channel.send("\n".join(lines))
+
     async def send_to_team(self, text: str):
-        """Send a message to the team channel."""
-        channel = self.get_channel(self.team_channel_id)
+        """Send a message to the first (primary) team channel."""
+        channel = self.get_channel(self._primary_team_channel_id)
         if not channel:
-            _log(f"[{self.bot_name}] team channel {self.team_channel_id} not accessible")
+            _log(f"[{self.bot_name}] team channel {self._primary_team_channel_id} not accessible")
             return
         try:
             for chunk in self._split_message(text):

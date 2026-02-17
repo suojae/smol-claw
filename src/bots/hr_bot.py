@@ -26,6 +26,8 @@ _BOT_NAME_ALIASES: Dict[str, str] = {
     "news": "news",
     "newsbot": "news",
     "radar": "news",
+    "researcher": "news",
+    "researcherbot": "news",
     "teamlead": "lead",
     "captain": "lead",
     "lead": "lead",

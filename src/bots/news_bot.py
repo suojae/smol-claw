@@ -1,13 +1,10 @@
-"""News bot — market research, trend monitoring, competitor analysis."""
-
-from typing import Any, Dict, Optional
+"""Researcher bot — market research, trend monitoring, competitor analysis."""
 
 from src.bots.base_bot import BaseMarketingBot
 from src.bots.personas import NEWS_PERSONA
-from src.executor import AIExecutor
 
 
-class NewsBot(BaseMarketingBot):
+class ResearcherBot(BaseMarketingBot):
     """Market research and news monitoring bot.
 
     Responsibilities:
@@ -17,18 +14,5 @@ class NewsBot(BaseMarketingBot):
     - Market trend briefings for team lead
     """
 
-    def __init__(
-        self,
-        own_channel_id: int,
-        team_channel_id: int,
-        executor: Optional[AIExecutor] = None,
-        clients: Optional[Dict[str, Any]] = None,
-    ):
-        super().__init__(
-            bot_name="NewsBot",
-            persona=NEWS_PERSONA,
-            own_channel_id=own_channel_id,
-            team_channel_id=team_channel_id,
-            executor=executor,
-            clients=clients,
-        )
+    def __init__(self, **kwargs):
+        super().__init__(bot_name="ResearcherBot", persona=NEWS_PERSONA, **kwargs)

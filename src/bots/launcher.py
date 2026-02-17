@@ -10,7 +10,7 @@ from src.bots.team_lead_bot import TeamLeadBot
 from src.bots.threads_bot import ThreadsBot
 from src.bots.linkedin_bot import LinkedInBot
 from src.bots.instagram_bot import InstagramBot
-from src.bots.news_bot import NewsBot
+from src.bots.news_bot import ResearcherBot
 from src.bots.hr_bot import HRBot
 
 
@@ -114,80 +114,34 @@ def _build_bots():
     _BOT_REGISTRY.clear()
 
     team_ch = DISCORD_CHANNELS["team"]
-    executor = _create_executor()
+    test_ch = DISCORD_CHANNELS.get("test", 0)
+    extra = [test_ch] if test_ch else []
     sns = _create_sns_clients()
 
+    # Bot definitions: (Class, token_key, sns_filter)
+    _BOT_DEFS = [
+        (TeamLeadBot, "lead", {"x"}),
+        (ThreadsBot, "threads", {"threads"}),
+        (LinkedInBot, "linkedin", {"linkedin"}),
+        (InstagramBot, "instagram", {"instagram"}),
+        (ResearcherBot, "news", {"news"}),
+    ]
+
     bots = []
-
-    # Team Lead — X client for POST_X action
-    token = DISCORD_TOKENS["lead"]
-    if token:
-        bot = TeamLeadBot(
-            own_channel_id=DISCORD_CHANNELS["lead"],
+    for BotClass, key, allowed_sns in _BOT_DEFS:
+        token = DISCORD_TOKENS[key]
+        if not token:
+            _log(f"Skipping {BotClass.__name__} — DISCORD_{key.upper()}_TOKEN not set")
+            continue
+        bot = BotClass(
+            own_channel_id=DISCORD_CHANNELS[key],
             team_channel_id=team_ch,
-            executor=executor,
-            clients={k: v for k, v in sns.items() if k == "x"},
+            extra_team_channels=extra,
+            executor=_create_executor(),  # independent executor per bot
+            clients={k: v for k, v in sns.items() if k in allowed_sns},
         )
-        _BOT_REGISTRY["lead"] = bot
+        _BOT_REGISTRY[key] = bot
         bots.append((bot, token))
-    else:
-        _log("Skipping TeamLeadBot — DISCORD_LEAD_TOKEN not set")
-
-    # Threads
-    token = DISCORD_TOKENS["threads"]
-    if token:
-        bot = ThreadsBot(
-            own_channel_id=DISCORD_CHANNELS["threads"],
-            team_channel_id=team_ch,
-            executor=executor,
-            clients={k: v for k, v in sns.items() if k == "threads"},
-        )
-        _BOT_REGISTRY["threads"] = bot
-        bots.append((bot, token))
-    else:
-        _log("Skipping ThreadsBot — DISCORD_THREADS_TOKEN not set")
-
-    # LinkedIn
-    token = DISCORD_TOKENS["linkedin"]
-    if token:
-        bot = LinkedInBot(
-            own_channel_id=DISCORD_CHANNELS["linkedin"],
-            team_channel_id=team_ch,
-            executor=executor,
-            clients={k: v for k, v in sns.items() if k == "linkedin"},
-        )
-        _BOT_REGISTRY["linkedin"] = bot
-        bots.append((bot, token))
-    else:
-        _log("Skipping LinkedInBot — DISCORD_LINKEDIN_TOKEN not set")
-
-    # Instagram
-    token = DISCORD_TOKENS["instagram"]
-    if token:
-        bot = InstagramBot(
-            own_channel_id=DISCORD_CHANNELS["instagram"],
-            team_channel_id=team_ch,
-            executor=executor,
-            clients={k: v for k, v in sns.items() if k == "instagram"},
-        )
-        _BOT_REGISTRY["instagram"] = bot
-        bots.append((bot, token))
-    else:
-        _log("Skipping InstagramBot — DISCORD_INSTAGRAM_TOKEN not set")
-
-    # News
-    token = DISCORD_TOKENS["news"]
-    if token:
-        bot = NewsBot(
-            own_channel_id=DISCORD_CHANNELS["news"],
-            team_channel_id=team_ch,
-            executor=executor,
-            clients={k: v for k, v in sns.items() if k == "news"},
-        )
-        _BOT_REGISTRY["news"] = bot
-        bots.append((bot, token))
-    else:
-        _log("Skipping NewsBot — DISCORD_NEWS_TOKEN not set")
 
     # HR — created last, receives bot_registry reference
     token = DISCORD_TOKENS["hr"]
@@ -195,7 +149,8 @@ def _build_bots():
         bot = HRBot(
             own_channel_id=DISCORD_CHANNELS["hr"],
             team_channel_id=team_ch,
-            executor=executor,
+            extra_team_channels=extra,
+            executor=_create_executor(),
             bot_registry=_BOT_REGISTRY,
         )
         _BOT_REGISTRY["hr"] = bot
