@@ -128,8 +128,21 @@ class BaseMarketingBot(discord.Client):
             cmd = content_stripped.split()[0].lower() if content_stripped else ""
 
             if cmd == "!cancel":
-                # !cancel works everywhere without mention
-                await self._handle_cancel(message)
+                args = content_stripped.split()
+                is_cancel_all = len(args) >= 2 and args[1].lower() == "all"
+
+                if is_own_channel:
+                    # 1:1 channel — always cancel own task
+                    await self._handle_cancel(message)
+                    return
+
+                if is_team_channel:
+                    if is_cancel_all or is_mentioned:
+                        # !cancel all → all bots cancel
+                        # !cancel @BotName → only mentioned bot cancels
+                        await self._handle_cancel(message)
+                    return
+
                 return
 
             if cmd == "!help":
@@ -410,7 +423,9 @@ class BaseMarketingBot(discord.Client):
         """Show available commands."""
         lines = [
             f"**[{self.bot_name}] 명령어 목록**",
-            "`!cancel` — 진행 중인 응답 취소",
+            "`!cancel @봇이름` — 특정 봇의 진행 중인 응답 취소",
+            "`!cancel all` — 모든 봇의 진행 중인 응답 취소",
+            "`!cancel` — (1:1 채널) 진행 중인 응답 취소",
             "`!clear` — 현재 채널 대화 기록 초기화",
             "`!clear all` — 전체 채널 대화 기록 초기화",
             "`!help` — 이 명령어 목록 표시",

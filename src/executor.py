@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import signal
 import tempfile
 import uuid
 from datetime import datetime
@@ -27,14 +28,15 @@ async def _run_subprocess(cmd_args):
 async def run_cancellable(cmd_args, timeout: float):
     """Run a subprocess with cancellation and timeout support.
 
-    On CancelledError or TimeoutError, kills the subprocess and waits
-    for it to exit before re-raising.
+    On CancelledError or TimeoutError, kills the entire process group
+    (including child processes) and waits for exit before re-raising.
     """
     proc = await asyncio.create_subprocess_exec(
         *cmd_args,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,  # own process group for clean kill
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -42,10 +44,14 @@ async def run_cancellable(cmd_args, timeout: float):
         )
         return proc, stdout, stderr
     except (asyncio.CancelledError, asyncio.TimeoutError):
+        # Kill entire process group (parent + children)
         try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
         await proc.wait()
         raise
 
