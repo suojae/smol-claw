@@ -103,13 +103,13 @@ class ClaudeExecutor:
         args.append(message)
 
         try:
-            proc, stdout, stderr = await run_cancellable(args, timeout=120.0)
+            proc, stdout, stderr = await run_cancellable(args, timeout=600.0)
 
             # Retry once after delay if session is still locked
             if proc.returncode != 0 and "already in use" in stderr.decode():
                 print("Session busy, retrying in 2s...")
                 await asyncio.sleep(2)
-                proc, stdout, stderr = await run_cancellable(args, timeout=120.0)
+                proc, stdout, stderr = await run_cancellable(args, timeout=600.0)
 
             if proc.returncode == 0:
                 print(f"[{datetime.now().isoformat()}] Completed")
@@ -122,7 +122,7 @@ class ClaudeExecutor:
             raise Exception(f"Exit code {proc.returncode}: {stderr.decode()}")
 
         except asyncio.TimeoutError:
-            raise Exception("Timeout (120s)")
+            raise Exception("Timeout (600s)")
 
 
 class CodexExecutor:
@@ -177,7 +177,7 @@ class CodexExecutor:
         print(f"[{datetime.now().isoformat()}] Executing with Codex CLI")
 
         try:
-            proc, stdout, stderr = await run_cancellable(args, timeout=180.0)
+            proc, stdout, stderr = await run_cancellable(args, timeout=600.0)
             if proc.returncode != 0:
                 err_text = stderr.decode("utf-8").strip() or stdout.decode("utf-8").strip()
                 raise Exception(f"Exit code {proc.returncode}: {err_text}")
@@ -197,7 +197,7 @@ class CodexExecutor:
                 print(warning)
             return response
         except asyncio.TimeoutError:
-            raise Exception("Timeout (180s)")
+            raise Exception("Timeout (600s)")
         finally:
             try:
                 out_file.unlink(missing_ok=True)

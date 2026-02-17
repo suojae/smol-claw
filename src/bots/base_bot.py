@@ -211,6 +211,21 @@ class BaseMarketingBot(discord.Client):
                 )
             )
             self._active_tasks[channel_id_for_task] = task
+
+            async def _progress_reporter(ch, interval=120):
+                """Send periodic progress updates while the LLM task runs."""
+                elapsed = 0
+                while True:
+                    await asyncio.sleep(interval)
+                    elapsed += interval
+                    mins = elapsed // 60
+                    await ch.send(
+                        f"[{self.bot_name}] 아직 생각 중... ({mins}분 경과)"
+                    )
+
+            progress_task = asyncio.create_task(
+                _progress_reporter(message.channel)
+            )
             try:
                 async with message.channel.typing():
                     response = await task
@@ -218,6 +233,7 @@ class BaseMarketingBot(discord.Client):
                 await message.channel.send(f"[{self.bot_name}] 응답이 취소됨.")
                 return
             finally:
+                progress_task.cancel()
                 # Only remove if this task is still the registered one
                 if self._active_tasks.get(channel_id_for_task) is task:
                     del self._active_tasks[channel_id_for_task]
