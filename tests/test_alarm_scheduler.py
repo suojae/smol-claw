@@ -72,6 +72,22 @@ class TestParseSchedule:
         with pytest.raises(ValueError):
             scheduler._parse_schedule("every 0h")
 
+    def test_once_hours(self, scheduler):
+        result = scheduler._parse_schedule("once 1h")
+        assert result == {"type": "once", "interval_minutes": 60}
+
+    def test_once_minutes(self, scheduler):
+        result = scheduler._parse_schedule("once 30m")
+        assert result == {"type": "once", "interval_minutes": 30}
+
+    def test_once_case_insensitive(self, scheduler):
+        result = scheduler._parse_schedule("Once 2H")
+        assert result["type"] == "once"
+
+    def test_once_too_short(self, scheduler):
+        with pytest.raises(ValueError, match="최소 간격"):
+            scheduler._parse_schedule("once 5m")
+
 
 # ---------------------------------------------------------------------------
 # CRUD
@@ -209,6 +225,31 @@ class TestGetDueAlarms:
         due = scheduler.get_due_alarms(now + timedelta(minutes=1))
         assert len(due) == 0
 
+    def test_once_not_yet_due(self, scheduler):
+        """once alarm should not fire before fire_at time."""
+        entry = scheduler.add_alarm("once 1h", "test", 1, "u", tz="UTC")
+        # Immediately after creation, not yet due (fire_at is ~1h in the future)
+        now = datetime.now(timezone.utc)
+        due = scheduler.get_due_alarms(now)
+        assert len(due) == 0
+
+    def test_once_due_after_elapsed(self, scheduler):
+        """once alarm should fire after fire_at time."""
+        entry = scheduler.add_alarm("once 1h", "test", 1, "u", tz="UTC")
+        # Simulate time 2 hours later
+        now = datetime.now(timezone.utc) + timedelta(hours=2)
+        due = scheduler.get_due_alarms(now)
+        assert len(due) == 1
+        assert due[0].alarm_id == entry.alarm_id
+
+    def test_once_not_due_after_run(self, scheduler):
+        """once alarm should not fire again after it has been run."""
+        entry = scheduler.add_alarm("once 1h", "test", 1, "u", tz="UTC")
+        now = datetime.now(timezone.utc) + timedelta(hours=2)
+        scheduler.mark_run(entry.alarm_id, now)
+        due = scheduler.get_due_alarms(now + timedelta(minutes=1))
+        assert len(due) == 0
+
     def test_disabled_alarm_skipped(self, scheduler):
         entry = scheduler.add_alarm("daily 09:00", "test", 1, "u", tz="UTC")
         entry.enabled = False
@@ -244,6 +285,20 @@ class TestPersistence:
         """Scheduler should handle missing file gracefully."""
         s = AlarmScheduler(bot_name="NoFile", storage_dir=tmp_dir)
         assert s.list_alarms() == []
+
+    def test_once_persistence_roundtrip(self, tmp_dir):
+        """once alarm should preserve fire_at through save/load cycle."""
+        s1 = AlarmScheduler(bot_name="OnceBot", storage_dir=tmp_dir)
+        entry = s1.add_alarm("once 2h", "remind me", 100, "alice", tz="UTC")
+        assert entry.fire_at != ""
+        assert entry.schedule_type == "once"
+
+        s2 = AlarmScheduler(bot_name="OnceBot", storage_dir=tmp_dir)
+        alarms = s2.list_alarms()
+        assert len(alarms) == 1
+        assert alarms[0].fire_at == entry.fire_at
+        assert alarms[0].schedule_type == "once"
+        assert alarms[0].interval_minutes == 120
 
     def test_load_corrupted_file(self, tmp_dir):
         """Scheduler should handle corrupted JSON gracefully."""

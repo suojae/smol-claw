@@ -21,7 +21,7 @@ def _log(msg: str):
 @dataclass
 class AlarmEntry:
     alarm_id: str
-    schedule_type: str  # "daily" | "weekday" | "interval"
+    schedule_type: str  # "daily" | "weekday" | "interval" | "once"
     hour: Optional[int]  # daily/weekday: 0-23
     minute: Optional[int]  # daily/weekday: 0-59
     interval_minutes: Optional[int]  # interval: minutes
@@ -31,6 +31,7 @@ class AlarmEntry:
     created_by: str
     created_at: str  # ISO datetime
     last_run: str = ""  # ISO datetime or empty
+    fire_at: str = ""  # ISO datetime — once 알람의 절대 실행 시각
     enabled: bool = True
 
 
@@ -39,6 +40,8 @@ _DAILY_RE = re.compile(r"^daily\s+(\d{1,2}):(\d{2})$", re.IGNORECASE)
 _WEEKDAY_RE = re.compile(r"^weekday\s+(\d{1,2}):(\d{2})$", re.IGNORECASE)
 _INTERVAL_H_RE = re.compile(r"^every\s+(\d+)h$", re.IGNORECASE)
 _INTERVAL_M_RE = re.compile(r"^every\s+(\d+)m$", re.IGNORECASE)
+_ONCE_H_RE = re.compile(r"^once\s+(\d+)h$", re.IGNORECASE)
+_ONCE_M_RE = re.compile(r"^once\s+(\d+)m$", re.IGNORECASE)
 
 _MAX_ALARMS_PER_BOT = 20
 _MIN_INTERVAL_MINUTES = 10
@@ -85,6 +88,10 @@ class AlarmScheduler:
             created_by=created_by,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
+        if parsed["type"] == "once":
+            fire_at_dt = datetime.now(timezone.utc) + timedelta(minutes=parsed["interval_minutes"])
+            entry.fire_at = fire_at_dt.isoformat()
+
         self._alarms[alarm_id] = entry
         self._save()
         return entry
@@ -152,8 +159,23 @@ class AlarmScheduler:
                 raise ValueError(f"최소 간격은 {_MIN_INTERVAL_MINUTES}분 (요청: {minutes}분)")
             return {"type": "interval", "interval_minutes": minutes}
 
+        m = _ONCE_H_RE.match(s)
+        if m:
+            hours = int(m.group(1))
+            minutes = hours * 60
+            if minutes < _MIN_INTERVAL_MINUTES:
+                raise ValueError(f"최소 간격은 {_MIN_INTERVAL_MINUTES}분 (요청: {hours}시간)")
+            return {"type": "once", "interval_minutes": minutes}
+
+        m = _ONCE_M_RE.match(s)
+        if m:
+            minutes = int(m.group(1))
+            if minutes < _MIN_INTERVAL_MINUTES:
+                raise ValueError(f"최소 간격은 {_MIN_INTERVAL_MINUTES}분 (요청: {minutes}분)")
+            return {"type": "once", "interval_minutes": minutes}
+
         raise ValueError(f"잘못된 스케줄 형식: {s!r}. "
-                         f"지원: daily HH:MM, weekday HH:MM, every Nh, every Nm")
+                         f"지원: daily HH:MM, weekday HH:MM, every Nh, every Nm, once Nh, once Nm")
 
     @staticmethod
     def _is_due(alarm: AlarmEntry, now_utc: datetime) -> bool:
@@ -161,6 +183,7 @@ class AlarmScheduler:
         try:
             tz = ZoneInfo(alarm.tz)
         except (ZoneInfoNotFoundError, KeyError):
+            _log(f"[_is_due] {alarm.alarm_id}: bad tz {alarm.tz!r}")
             return False
 
         now_local = now_utc.astimezone(tz)
@@ -173,6 +196,7 @@ class AlarmScheduler:
             scheduled_time = now_local.replace(
                 hour=alarm.hour, minute=alarm.minute, second=0, microsecond=0
             )
+            _log(f"[_is_due] {alarm.alarm_id}: now_local={now_local.strftime('%H:%M')} sched={scheduled_time.strftime('%H:%M')} last_run={alarm.last_run!r}")
             # Must be past the scheduled time
             if now_local < scheduled_time:
                 return False
@@ -199,6 +223,14 @@ class AlarmScheduler:
             except (ValueError, TypeError):
                 return True
 
+        if alarm.schedule_type == "once":
+            if alarm.last_run:
+                return False  # 이미 실행됨
+            if not alarm.fire_at:
+                return False
+            fire_at_utc = datetime.fromisoformat(alarm.fire_at)
+            return now_utc >= fire_at_utc
+
         return False
 
     def _load(self):
@@ -222,6 +254,7 @@ class AlarmScheduler:
                                 created_by=str(item.get("created_by", "")),
                                 created_at=str(item.get("created_at", "")),
                                 last_run=str(item.get("last_run", "")),
+                                fire_at=str(item.get("fire_at", "")),
                                 enabled=bool(item.get("enabled", True)),
                             )
                             self._alarms[entry.alarm_id] = entry

@@ -83,7 +83,8 @@ class BaseMarketingBot(discord.Client):
         self._rehired: bool = False  # set by HR on rehire → triggers onboarding context
         self._active_tasks: Dict[int, asyncio.Task] = {}  # channel_id → running Task
         self._bot_chain_count: Dict[int, int] = {}  # channel_id → consecutive bot reply count
-        self._max_bot_chain: int = 5  # max bot-to-bot replies before stopping
+        self._max_bot_chain: int = 3  # max bot-to-bot replies before stopping
+        self._suppress_bot_replies: bool = False
         self._alarm_scheduler = AlarmScheduler(bot_name=bot_name)
         self._alarm_loop_task: Optional[asyncio.Task] = None
         self._alarm_fire_tasks: set = set()  # track in-flight alarm tasks for cleanup
@@ -138,6 +139,9 @@ class BaseMarketingBot(discord.Client):
         # --- Command dispatch (human-only) ---
         if not message.author.bot:
             content_stripped = message.content.strip()
+            # Strip bot mention prefix so "@BotName !cmd" parses correctly
+            if self.user:
+                content_stripped = content_stripped.replace(f"<@{self.user.id}>", "").strip()
             cmd = content_stripped.split()[0].lower() if content_stripped else ""
 
             if cmd == "!cancel":
@@ -181,6 +185,9 @@ class BaseMarketingBot(discord.Client):
                     return
 
         if message.author.bot:
+            if self._suppress_bot_replies:
+                _log(f"[{self.bot_name}] suppressed (post-cancel cooldown)")
+                return
             # Bot messages: only respond if mentioned in team channel
             if is_team_channel and is_mentioned:
                 chain = self._bot_chain_count.get(message.channel.id, 0)
@@ -191,7 +198,8 @@ class BaseMarketingBot(discord.Client):
                 await self._respond(message)
             return
 
-        # User messages — reset bot chain counter
+        # User messages — reset bot chain counter and cancel suppression
+        self._suppress_bot_replies = False
         if is_team_channel:
             self._bot_chain_count[message.channel.id] = 0
 
@@ -292,6 +300,11 @@ class BaseMarketingBot(discord.Client):
             history.append({"role": "assistant", "text": response[:200]})
             if len(history) > self._max_history * 2:
                 self._channel_history[channel_id] = history[-self._max_history * 2:]
+
+            # If cancel happened during LLM execution, suppress bot-triggered response
+            if self._suppress_bot_replies and message.author.bot:
+                _log(f"[{self.bot_name}] response suppressed (cancel during LLM)")
+                return
 
             # Parse action blocks from LLM response
             actions = _ACTION_RE.findall(response)
@@ -449,6 +462,7 @@ class BaseMarketingBot(discord.Client):
                 # Team channel: every bot receives !cancel all independently
                 # → each bot cancels its own tasks only (avoids duplicate cancellation)
                 count = self._cancel_own_tasks()
+                self._suppress_bot_replies = True
                 if count:
                     await message.channel.send(f"[{self.bot_name}] {count}건 취소됨.")
             else:
@@ -460,6 +474,7 @@ class BaseMarketingBot(discord.Client):
                 total = 0
                 for bot in all_bots:
                     total += bot._cancel_own_tasks()
+                    bot._suppress_bot_replies = True
                 if total:
                     await message.channel.send(f"[{self.bot_name}] 전체 취소: {total}건의 작업이 중단됨.")
                 else:
@@ -470,6 +485,7 @@ class BaseMarketingBot(discord.Client):
         task = self._active_tasks.get(channel_id)
         if task and not task.done():
             task.cancel()
+            self._suppress_bot_replies = True
             # The CancelledError handler in _respond sends the user-facing message.
         else:
             # In team channels, stay silent to avoid 5-bot noise.
@@ -526,10 +542,15 @@ class BaseMarketingBot(discord.Client):
 
     async def _alarm_loop(self):
         """Check alarms every 60 seconds and fire due ones."""
+        _log(f"[{self.bot_name}] alarm loop started, {len(self._alarm_scheduler.list_alarms())} alarm(s) loaded")
         while not self.is_closed():
             await asyncio.sleep(60)
             try:
-                due = self._alarm_scheduler.get_due_alarms(datetime.now(timezone.utc))
+                now = datetime.now(timezone.utc)
+                all_alarms = self._alarm_scheduler.list_alarms()
+                due = self._alarm_scheduler.get_due_alarms(now)
+                if all_alarms:
+                    _log(f"[{self.bot_name}] alarm check: {len(all_alarms)} total, {len(due)} due (UTC={now.strftime('%H:%M')})")
                 for alarm in due:
                     if alarm.alarm_id in self._in_flight_alarms:
                         continue
@@ -541,6 +562,7 @@ class BaseMarketingBot(discord.Client):
 
     async def _fire_alarm(self, alarm: AlarmEntry):
         """Execute alarm: run LLM with prompt → send result to channel."""
+        _log(f"[{self.bot_name}] _fire_alarm START: {alarm.alarm_id} ch={alarm.channel_id}")
         self._in_flight_alarms.add(alarm.alarm_id)
         # Mark run BEFORE execution to prevent duplicate fire on slow LLM calls
         self._alarm_scheduler.mark_run(alarm.alarm_id, datetime.now(timezone.utc))
@@ -549,7 +571,9 @@ class BaseMarketingBot(discord.Client):
             if not channel:
                 _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: channel {alarm.channel_id} not found")
                 return
+            _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: channel found, calling executor...")
             if not self.executor:
+                _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: no executor")
                 return
             # Sanitize prompt: strip any injected action blocks
             safe_prompt = _ACTION_RE.sub("", alarm.prompt).strip()
@@ -558,11 +582,17 @@ class BaseMarketingBot(discord.Client):
                 system_prompt=self.persona,
                 model=MODEL_ALIASES[self._current_model],
             )
+            _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: executor returned {len(response)} chars")
             # Security: strip action blocks from alarm-triggered responses
             response = _ACTION_RE.sub("", response).strip()
             prefix = f"[{self.bot_name}] 알람 ({alarm.alarm_id})\n"
             for chunk in self._split_message(prefix + response):
                 await channel.send(chunk)
+            _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: sent to channel OK")
+            # once 알람은 실행 후 자동 삭제
+            if alarm.schedule_type == "once":
+                self._alarm_scheduler.remove_alarm(alarm.alarm_id)
+                _log(f"[{self.bot_name}] alarm {alarm.alarm_id}: once alarm auto-removed")
         except Exception as e:
             _log(f"[{self.bot_name}] alarm {alarm.alarm_id} failed: {e}")
         finally:
@@ -607,6 +637,11 @@ class BaseMarketingBot(discord.Client):
         await message.channel.send("\n".join(lines))
 
     @staticmethod
+    def _escape_mentions(text: str) -> str:
+        """Escape @mentions to prevent triggering other bots."""
+        return re.sub(r"@(\w+)", r"`@\1`", text)
+
+    @staticmethod
     def _format_schedule(alarm: AlarmEntry) -> str:
         """Format alarm schedule for display."""
         if alarm.schedule_type == "daily":
@@ -617,6 +652,10 @@ class BaseMarketingBot(discord.Client):
             if alarm.interval_minutes >= 60 and alarm.interval_minutes % 60 == 0:
                 return f"{alarm.interval_minutes // 60}시간마다"
             return f"{alarm.interval_minutes}분마다"
+        elif alarm.schedule_type == "once":
+            if alarm.interval_minutes >= 60 and alarm.interval_minutes % 60 == 0:
+                return f"{alarm.interval_minutes // 60}시간 후 1회"
+            return f"{alarm.interval_minutes}분 후 1회"
         return alarm.schedule_type
 
     async def _execute_set_alarm(self, body: str, message: discord.Message) -> str:
@@ -644,7 +683,7 @@ class BaseMarketingBot(discord.Client):
                 f"[{self.bot_name}] 알람 등록 완료\n"
                 f"- ID: `{entry.alarm_id}`\n"
                 f"- 스케줄: {sched_display}\n"
-                f"- 프롬프트: {entry.prompt[:50]}"
+                f"- 프롬프트: {self._escape_mentions(entry.prompt[:200])}"
             )
         except ValueError as e:
             return f"[{self.bot_name}] 알람 등록 실패: {e}"

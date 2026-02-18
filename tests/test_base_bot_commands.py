@@ -222,6 +222,72 @@ async def test_concurrent_tasks_no_orphan():
 # Alias-based text mention detection
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Cancel suppression tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cancel_sets_suppress_flag():
+    """!cancel should set _suppress_bot_replies flag."""
+    bot = _make_bot()
+    fake_task = MagicMock()
+    fake_task.done.return_value = False
+    fake_task.cancel = MagicMock()
+    bot._active_tasks[OWN_CHANNEL] = fake_task
+
+    msg = _make_message("!cancel", OWN_CHANNEL)
+    await bot.on_message(msg)
+
+    assert bot._suppress_bot_replies is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_sets_suppress_flag():
+    """!cancel all should set _suppress_bot_replies flag."""
+    bot = _make_bot()
+    msg = _make_message("!cancel all", OWN_CHANNEL)
+    await bot.on_message(msg)
+
+    assert bot._suppress_bot_replies is True
+
+
+@pytest.mark.asyncio
+async def test_suppress_cleared_on_human_message():
+    """Human message should clear _suppress_bot_replies flag."""
+    bot = _make_bot(executor=MagicMock())
+    bot._suppress_bot_replies = True
+
+    msg = _make_message("안녕", OWN_CHANNEL)
+    # Mock _respond to avoid full LLM execution
+    bot._respond = AsyncMock()
+    await bot.on_message(msg)
+
+    assert bot._suppress_bot_replies is False
+
+
+@pytest.mark.asyncio
+async def test_bot_message_suppressed_after_cancel():
+    """Bot messages should be suppressed when _suppress_bot_replies is True."""
+    bot = _make_bot()
+    bot._suppress_bot_replies = True
+
+    # Simulate a bot message mentioning this bot in team channel
+    msg = _make_message(f"<@{BOT_USER_ID}> 결과입니다", TEAM_CHANNEL, is_bot=True)
+    msg.author.mentioned_in = MagicMock(return_value=False)
+
+    # Patch user.mentioned_in to return True for this message
+    bot.user.mentioned_in = MagicMock(return_value=True)
+
+    await bot.on_message(msg)
+
+    # Should not respond — suppressed
+    msg.channel.send.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Alias-based text mention detection
+# ---------------------------------------------------------------------------
+
 def test_alias_text_mention():
     """Bot with aliases should respond to @OldName text mentions."""
     bot = BaseMarketingBot(

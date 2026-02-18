@@ -363,6 +363,16 @@ class TestFormatSchedule:
         a = AlarmEntry("id", "interval", None, None, 30, "UTC", "", 0, "", "")
         assert BaseMarketingBot._format_schedule(a) == "30분마다"
 
+    def test_once_hours(self):
+        from src.bots.alarm_scheduler import AlarmEntry
+        a = AlarmEntry("id", "once", None, None, 60, "UTC", "", 0, "", "")
+        assert BaseMarketingBot._format_schedule(a) == "1시간 후 1회"
+
+    def test_once_minutes(self):
+        from src.bots.alarm_scheduler import AlarmEntry
+        a = AlarmEntry("id", "once", None, None, 30, "UTC", "", 0, "", "")
+        assert BaseMarketingBot._format_schedule(a) == "30분 후 1회"
+
 
 # ---------------------------------------------------------------------------
 # _parse_alarm_body
@@ -391,3 +401,74 @@ class TestParseAlarmBody:
     def test_empty_body(self):
         result = BaseMarketingBot._parse_alarm_body("")
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# _escape_mentions
+# ---------------------------------------------------------------------------
+
+class TestEscapeMentions:
+    def test_escapes_at_mentions(self):
+        text = "@ThreadsBot 뉴스 5개 보여줘 @TeamLead"
+        result = BaseMarketingBot._escape_mentions(text)
+        assert result == "`@ThreadsBot` 뉴스 5개 보여줘 `@TeamLead`"
+
+    def test_no_mentions_unchanged(self):
+        text = "뉴스 5개 보여줘"
+        assert BaseMarketingBot._escape_mentions(text) == text
+
+
+# ---------------------------------------------------------------------------
+# Alarm confirmation shows full prompt (up to 200 chars) with escaped mentions
+# ---------------------------------------------------------------------------
+
+class TestAlarmConfirmation:
+    @pytest.mark.asyncio
+    async def test_confirmation_escapes_mentions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = _make_bot(tmp_dir=tmp)
+            msg = _make_message("", TEAM_CHANNEL)
+            body = "schedule: daily 09:00\nprompt: @ThreadsBot 에게 뉴스 요약 시키기"
+            result = await bot._execute_action("SET_ALARM", body, message=msg)
+            assert "등록 완료" in result
+            assert "`@ThreadsBot`" in result
+
+    @pytest.mark.asyncio
+    async def test_confirmation_shows_full_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bot = _make_bot(tmp_dir=tmp)
+            msg = _make_message("", TEAM_CHANNEL)
+            long_prompt = "오늘의 마케팅 트렌드 Top 5를 검색해서 요약해줘 그리고 각각에 대한 분석도"
+            body = f"schedule: daily 09:00\nprompt: {long_prompt}"
+            result = await bot._execute_action("SET_ALARM", body, message=msg)
+            assert "등록 완료" in result
+            # Should show more than 50 chars of the prompt
+            assert long_prompt[:60] in result
+
+
+# ---------------------------------------------------------------------------
+# _fire_alarm once auto-removal
+# ---------------------------------------------------------------------------
+
+class TestFireAlarmOnce:
+    @pytest.mark.asyncio
+    async def test_fire_alarm_once_auto_removed(self):
+        """once alarm should be auto-removed after successful fire."""
+        with tempfile.TemporaryDirectory() as tmp:
+            executor = MagicMock()
+            executor.execute = AsyncMock(return_value="결과입니다.")
+            bot = _make_bot(executor=executor, tmp_dir=tmp)
+
+            entry = bot._alarm_scheduler.add_alarm("once 1h", "remind me", 100, "u")
+            assert len(bot._alarm_scheduler.list_alarms()) == 1
+
+            mock_channel = MagicMock()
+            mock_channel.send = AsyncMock()
+            bot.get_channel = MagicMock(return_value=mock_channel)
+
+            await bot._fire_alarm(entry)
+
+            # Alarm should be auto-removed
+            assert len(bot._alarm_scheduler.list_alarms()) == 0
+            # But the response was still sent
+            mock_channel.send.assert_awaited()
