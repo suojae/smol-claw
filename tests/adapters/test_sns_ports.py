@@ -30,31 +30,31 @@ class TestSNSPortConformance:
     """Verify that SNS clients have the expected interface."""
 
     def test_x_client_has_interface(self):
-        from src.x_client import XClient
+        from src.adapters.sns.x_client import XClient
         client = XClient()
         assert hasattr(client, "is_configured")
         assert hasattr(client, "post")
 
     def test_threads_client_has_interface(self):
-        from src.threads_client import ThreadsClient
+        from src.adapters.sns.threads_client import ThreadsClient
         client = ThreadsClient()
         assert hasattr(client, "is_configured")
         assert hasattr(client, "post")
 
     def test_linkedin_client_has_interface(self):
-        from src.linkedin_client import LinkedInClient
+        from src.adapters.sns.linkedin_client import LinkedInClient
         client = LinkedInClient()
         assert hasattr(client, "is_configured")
         assert hasattr(client, "post")
 
     def test_instagram_client_has_interface(self):
-        from src.instagram_client import InstagramClient
+        from src.adapters.sns.instagram_client import InstagramClient
         client = InstagramClient()
         assert hasattr(client, "is_configured")
         assert hasattr(client, "post")
 
     def test_news_client_has_interface(self):
-        from src.news_client import NewsClient
+        from src.adapters.sns.news_client import NewsClient
         client = NewsClient()
         assert hasattr(client, "is_configured")
         assert hasattr(client, "search")
@@ -64,42 +64,37 @@ class TestLLMPortConformance:
     """Verify that executor classes have the expected interface."""
 
     def test_claude_executor_has_interface(self):
-        from src.executor import ClaudeExecutor
+        from src.adapters.llm.executor import ClaudeExecutor
         e = ClaudeExecutor()
         assert hasattr(e, "execute")
         assert hasattr(e, "usage_tracker")
 
     def test_codex_executor_has_interface(self):
-        from src.executor import CodexExecutor
+        from src.adapters.llm.executor import CodexExecutor
         e = CodexExecutor()
         assert hasattr(e, "execute")
         assert hasattr(e, "usage_tracker")
 
 
 class TestAdapterReexports:
-    """Verify adapter SNS modules are accessible from both old and new paths."""
+    """Verify adapter SNS modules expose correct classes."""
 
     def test_x_client(self):
-        from src.adapters.sns.x_client import XClient as AdapterXClient
-        from src.x_client import XClient
-        assert AdapterXClient is XClient
+        from src.adapters.sns.x_client import XClient
+        assert XClient is not None
 
     def test_threads_client(self):
-        from src.adapters.sns.threads_client import ThreadsClient as AdapterClient
-        from src.threads_client import ThreadsClient
-        assert AdapterClient is ThreadsClient
+        from src.adapters.sns.threads_client import ThreadsClient
+        assert ThreadsClient is not None
 
     def test_linkedin_client(self):
-        from src.adapters.sns.linkedin_client import LinkedInClient as AdapterClient
-        from src.linkedin_client import LinkedInClient
-        assert AdapterClient is LinkedInClient
+        from src.adapters.sns.linkedin_client import LinkedInClient
+        assert LinkedInClient is not None
 
     def test_instagram_client(self):
-        from src.adapters.sns.instagram_client import InstagramClient as AdapterClient
-        from src.instagram_client import InstagramClient
-        assert AdapterClient is InstagramClient
+        from src.adapters.sns.instagram_client import InstagramClient
+        assert InstagramClient is not None
 
     def test_news_client(self):
-        from src.adapters.sns.news_client import NewsClient as AdapterClient
-        from src.news_client import NewsClient
-        assert AdapterClient is NewsClient
+        from src.adapters.sns.news_client import NewsClient
+        assert NewsClient is not None
