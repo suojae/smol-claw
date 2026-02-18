@@ -1,7 +1,0 @@
-"""Backward-compatibility shim — alarm_scheduler re-exports from src.domain.alarm."""
-from src.domain.alarm import (  # noqa: F401
-    AlarmEntry,
-    AlarmScheduler,
-    _MAX_ALARMS_PER_BOT,
-    _MIN_INTERVAL_MINUTES,
-)

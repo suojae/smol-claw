@@ -351,7 +351,7 @@ class AgentBrain:
                 meta["image_url"] = image_url
 
         if CONFIG["require_manual_approval"]:
-            from src.approval import enqueue_post
+            from src.adapters.web.approval import enqueue_post
             result = await enqueue_post(platform, action_kind, post_text, meta=meta)
             return f"[{self.bot_name}] 승인 대기 중 (ID: {result['approval_id']})"
 

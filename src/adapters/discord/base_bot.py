@@ -12,7 +12,7 @@ from typing import Any, Optional, Dict, List
 
 import discord
 
-from src.adapters.discord.alarm_scheduler import AlarmEntry, AlarmScheduler
+from src.domain.alarm import AlarmEntry, AlarmScheduler
 from src.config import CONFIG, MODEL_ALIASES, DEFAULT_MODEL
 from src.domain.action_parser import (
     ACTION_MAP as _ACTION_MAP,
